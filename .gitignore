@@ -1,0 +1,20 @@
+# virtualenv
+.venv/
+venv/
+# dotenv
+.env
+# Database stuff
+*.sqlite
+*.sqlite3
+db.sqlite3
+*.rdb
+# Editor
+.vscode
+.idea/
+# Other unwanted stuff
+.DS_Store
+.DS_STORE
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
