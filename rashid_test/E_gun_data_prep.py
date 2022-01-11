@@ -1,4 +1,5 @@
 
+from sklearn import metrics
 import uproot
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,10 +13,19 @@ from tqdm import tqdm
 from IPython.display import Image
 #from sklearn.tree import export_graphviz
 from sklearn.ensemble import GradientBoostingClassifier
-#import xgboost as xgb
-#from xgboost import XGBClassifier
+import xgboost as xgb
+from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score
 import pickle
+import skopt
+from skopt.space import Real, Integer
+from skopt import gp_minimize
+from functools import partial
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from sklearn.metrics import confusion_matrix
 from IPython.core.interactiveshell import InteractiveShell
 InteractiveShell.ast_node_interactivity = "all"
 pd.options.mode.chained_assignment = None
@@ -51,7 +61,7 @@ class DataPrep:
             #Remove rows with no ElectronTracks
             mask1_indices = np.isin(events,nET)
             events_after_mask1 = events[~mask1_indices]
-            print(events_after_mask1.shape)
+            #print(events_after_mask1.shape)
 
             #Further Remove rows with no BremClusters
             nCI = []  # nCI = no Cluster Info, i.e. remove events with no cluster info
@@ -62,7 +72,7 @@ class DataPrep:
             
             mask2_indices = np.isin(events_after_mask1,nCI)
             events_after_mask2 = events_after_mask1[~mask2_indices]
-            print(events_after_mask2.shape)
+            #print(events_after_mask2.shape)
 
             # Extract the info from tree with correct indices
             ET = ElectronTrack.loc[events_after_mask2, self.features[:6]]
@@ -84,7 +94,7 @@ class DataPrep:
 
         return df.droplevel(level = 'subentry').reset_index().rename(columns = {'entry':'id'})
 
-    def generate_data_mixing(self, df: pd.DataFrame):
+    def generate_data_mixing(self, df: pd.DataFrame, ratio_of_signal_to_background = 1):
         ids = df['id'].unique().tolist()
         mixed_data = []
         columns_to_replace = [
@@ -94,10 +104,10 @@ class DataPrep:
             'ElectronTrack_X',
             'ElectronTrack_Y',
             'ElectronTrack_Z']
-        for id in tqdm(ids[:10000]):
+        for id in tqdm(ids):
             running_df = df[df['id']==id]
             running_df['label'] = 1
-            sampled_df = df[df['id']!=id].sample(len(running_df.index.tolist()))
+            sampled_df = df[df['id']!=id].sample(round(len(running_df.index.tolist())*ratio_of_signal_to_background))
             for column in columns_to_replace:
                 sampled_df[column] = running_df[column].head(1).to_list()[0]
             sampled_df['label'] = 0
@@ -106,17 +116,17 @@ class DataPrep:
 
         return pd.concat(mixed_data)
 
-    def prepare_data(self, df: pd.DataFrame, split_frac = 0.9):
-        label_list = df['label'].to_numpy()
-        new_df = df.drop(['label', 'id'], axis=1)
-        new_data = new_df.to_numpy()
-        indices = np.random.permutation(new_data.shape[0])
-        i = int(split_frac * new_data.shape[0])
-        training_idx, validation_idx = indices[:i], indices[i:]
-        training_data, validation_data = new_data[training_idx,:], new_data[validation_idx,:]
-        training_labels, validation_labels = label_list[training_idx], label_list[validation_idx]
-        return training_data, training_labels, validation_data, validation_labels
 
+    def train_validate_test_split(self, df: pd.DataFrame, test_ratio=.1, validation_ratio=.2, seed=None):
+        y_data = df['label']#.to_numpy()
+        X_data = df.drop(['label', 'id'], axis=1)#.to_numpy()
+
+        train_ratio = 1- (test_ratio + validation_ratio)
+        x_train, x_temp, y_train, y_temp = train_test_split(X_data, y_data, stratify = y_data, test_size=1 - train_ratio, random_state=seed)
+
+        x_val, x_test, y_val, y_test = train_test_split(x_temp, y_temp, test_size=test_ratio/(test_ratio + validation_ratio), shuffle = False) 
+
+        return (x_train,y_train), (x_val,y_val), (x_test,y_test)
 
 if __name__ == '__main__':
     features = ['ElectronTrack_PX','ElectronTrack_PY','ElectronTrack_PZ','ElectronTrack_X','ElectronTrack_Y','ElectronTrack_Z', 
@@ -129,20 +139,92 @@ if __name__ == '__main__':
 
     DP = DataPrep(fname,features,1000)
     df = DP.extract_data()
-    mixed_data_groups = DP.generate_data_mixing(df)
-    training_data, training_labels, validation_data, validation_labels = DP.prepare_data(mixed_data_groups)
+    mixed_data_groups = DP.generate_data_mixing(df,ratio_of_signal_to_background=1)
+    # training_data, training_labels, validation_data, validation_labels = DP.prepare_data(mixed_data_groups)
+    (x_train,y_train), (x_val,y_val), (x_test,y_test) = DP.train_validate_test_split(mixed_data_groups,seed = 42)
 
-    # Test Model with calo cluster info trained on 80k electron gun dataset
-    with open('xgb_model_calo_info.pkl', 'rb') as f:
-            xgb_model = pickle.load(f)
-    train_pred = xgb_model.predict(training_data)
-    val_pred = xgb_model.predict(validation_data)
-    #test_pred =  xgb_model.predict(training_data1)
-    train_score = accuracy_score(training_labels,train_pred)
-    val_score = accuracy_score(validation_labels,val_pred)
-    test_score = 'Not explored here!' #accuracy_score(training_labels1,test_pred)
-    print('train_score: ', train_score,' | ', 'Val_score: ', val_score,' | ','test_score: ', test_score)
+    # # defining the space
+    # space = [
+    #     Real(0.6, 0.9, name="colsample_bylevel"),
+    #     Real(0.4, 0.7, name="colsample_bytree"),
+    #     Real(0.01, 1.5, name="gamma"),
+    #     Real(0.0001, 1.5, name="learning_rate"),
+    #     Real(0.1, 10, name="max_delta_step"),
+    #     Integer(3, 15, name="max_depth"),
+    #     Real(10, 500, name="min_child_weight"),
+    #     Integer(10, 1500, name="n_estimators"),
+    #     Real(0.1, 100, name="reg_alpha"),
+    #     Real(0.1, 100, name="reg_lambda"),
+    #     Real(0.4, 0.7, name="subsample"),
+    # ]
+     
 
-    feat_imp = pd.Series(xgb_model.feature_importances_,features).sort_values(ascending=False)
-    feat_imp.plot(kind='bar', title='Feature Importances')
-    plt.ylabel('Feature Importance Score')
+    # # function to fit the model and return the performance of the model
+    # def return_model_assessment(args, X_train, y_train, X_test):
+    #     global models, train_scores, test_scores, curr_model_hyper_params
+    #     params = {curr_model_hyper_params[i]: args[i] for i, j in enumerate(curr_model_hyper_params)}
+    #     model = XGBClassifier(random_state=42, seed=42,eval_metric='mlogloss',use_label_encoder=False)
+    #     model.set_params(**params)
+    #     fitted_model = model.fit(X_train, y_train, sample_weight=None)
+    #     models.append(fitted_model)
+    #     train_predictions = model.predict(X_train)
+    #     test_predictions = model.predict(X_test)
+    #     train_score = f1_score(train_predictions, y_train)
+    #     test_score = f1_score(test_predictions, y_test)
+    #     train_scores.append(train_score)
+    #     test_scores.append(test_score)
+    #     return 1 - test_score
+
+    # # collecting the fitted models and model performance
+    # models = []
+    # train_scores = []
+    # test_scores = []
+    # curr_model_hyper_params = ['colsample_bylevel', 'colsample_bytree', 'gamma', 'learning_rate', 'max_delta_step',
+    #                         'max_depth', 'min_child_weight', 'n_estimators', 'reg_alpha', 'reg_lambda', 'subsample']
+    # objective_function = partial(return_model_assessment, X_train=X_train, y_train=y_train, X_test=X_test)
+
+    # # running the algorithm
+    # n_calls = 100 # number of times you want to train your model
+    # results = gp_minimize(objective_function, space, base_estimator=None, n_calls=n_calls, n_random_starts=n_calls-1, random_state=42)
+
+
+
+    # # # Test Model with calo cluster info trained on 80k electron gun dataset
+    # # with open('ML_models/xgb_model_calo_info.pkl', 'rb') as f:
+    # #         xgb_model2 = pickle.load(f)
+    # # 
+    # xgb_model2 = models[-1]
+    # train_pred = xgb_model2.predict(X_train)
+    # val_pred = xgb_model2.predict(X_test)
+    # #test_pred =  xgb_model.predict(training_data1)
+    # train_score = accuracy_score(y_train,train_pred)
+    # val_score = accuracy_score(y_test,val_pred)
+    # test_score = 'Not explored here!' #accuracy_score(training_labels1,test_pred)
+    # print('train_score: ', train_score,' | ', 'Val_score: ', val_score,' | ','test_score: ', test_score)
+
+    # feat_imp = pd.Series(xgb_model2.feature_importances_,features).sort_values(ascending=False)
+    # feat_imp.plot(kind='bar', title='Feature Importances')
+    # plt.ylabel('Feature Importance Score')
+    # TN, FP, FN, TP = confusion_matrix(y_test, val_pred).ravel()
+    
+    # # Sensitivity, hit rate, recall, or true positive rate
+    # TPR = TP/(TP+FN)
+    # # Specificity or true negative rate
+    # TNR = TN/(TN+FP) 
+    # # Precision or positive predictive value
+    # PPV = TP/(TP+FP)
+    # # Negative predictive value
+    # NPV = TN/(TN+FN)
+    # # Fall out or false positive rate
+    # FPR = FP/(FP+TN)
+    # # False negative rate
+    # FNR = FN/(TP+FN)
+    # # False discovery rate
+    # FDR = FP/(TP+FP)
+
+    # # Overall accuracy
+    # ACC = (TP+TN)/(TP+FP+FN+TN)
+
+    # # comparison with existing recovery algorithms
+    # # 
+

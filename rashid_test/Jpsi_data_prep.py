@@ -15,6 +15,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 #import xgboost as xgb
 #from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
 import pickle
 from IPython.core.interactiveshell import InteractiveShell
 InteractiveShell.ast_node_interactivity = "all"
@@ -94,7 +95,7 @@ class DataPrep:
             idx = pd.IndexSlice
             ET_even = ET_even.loc[idx[:,0],:]
             ET_odd = ET_odd.loc[idx[:, 0], :]
-            print(ET_even.shape, ET_odd.shape)
+            #print(ET_even.shape, ET_odd.shape)
             
             # Merging even and odd rows seperatly
             merge_even_BC_ET = pd.concat([ET_even, CI_even], axis=1).fillna(method='ffill')
@@ -105,7 +106,7 @@ class DataPrep:
             df = pd.concat([merge_even_BC_ET,merge_odd_BC_ET], axis = 0).sort_index()
         return df.droplevel(level = 'subentry').reset_index().rename(columns = {'entry':'id'})
 
-    def generate_data_mixing(self, df: pd.DataFrame):
+    def generate_data_mixing(self, df: pd.DataFrame,  ratio_of_signal_to_background = 1):
         ids = df['id'].unique().tolist()
         mixed_data = []
         columns_to_replace = [
@@ -118,7 +119,7 @@ class DataPrep:
         for id in tqdm(ids):
             running_df = df[df['id']==id]
             running_df['label'] = 1
-            sampled_df = df[df['id']!=id].sample(len(running_df.index.tolist()))
+            sampled_df = df[df['id']!=id].sample(round(len(running_df.index.tolist())*ratio_of_signal_to_background))
             for column in columns_to_replace:
                 sampled_df[column] = running_df[column].head(1).to_list()[0]
             sampled_df['label'] = 0
@@ -127,17 +128,16 @@ class DataPrep:
 
         return pd.concat(mixed_data)
 
-    def prepare_data(self, df: pd.DataFrame, split_frac = 0.9):
-        label_list = df['label'].to_numpy()
-        new_df = df.drop(['label', 'id'], axis=1)
-        new_data = new_df.to_numpy()
-        indices = np.random.permutation(new_data.shape[0])
-        i = int(split_frac * new_data.shape[0])
-        training_idx, validation_idx = indices[:i], indices[i:]
-        training_data, validation_data = new_data[training_idx,:], new_data[validation_idx,:]
-        training_labels, validation_labels = label_list[training_idx], label_list[validation_idx]
-        return training_data, training_labels, validation_data, validation_labels
+    def train_validate_test_split(self, df: pd.DataFrame, test_ratio=.1, validation_ratio=.2, seed=None):
+        y_data = df['label'].to_numpy()
+        X_data = df.drop(['label', 'id'], axis=1).to_numpy()
 
+        train_ratio = 1- (test_ratio + validation_ratio)
+        x_train, x_temp, y_train, y_temp = train_test_split(X_data, y_data, stratify = y_data, test_size=1 - train_ratio, random_state=seed)
+
+        x_val, x_test, y_val, y_test = train_test_split(x_temp, y_temp, test_size=test_ratio/(test_ratio + validation_ratio), shuffle = False) 
+
+        return (x_train,y_train), (x_val,y_val), (x_test,y_test)
 
 
 
@@ -149,7 +149,7 @@ if __name__ == '__main__':
                 'CaloCluster_Covariance12','CaloCluster_Covariance20','CaloCluster_Covariance21','CaloCluster_Covariance22']
 
 
-    fname = 'data\\Bu2JpsiK_ee_1000_events.root'
+    fname = 'data\\Bu2JpsiK_ee_1000_events.root' #'data\\Bu2JpsiK_ee_1000_events.root'
 
     DP = DataPrep(fname,features, 2000)
     df = DP.extract_data()
@@ -160,7 +160,7 @@ if __name__ == '__main__':
 
 
     #%% Test model with Calo Cluster info trained on electron gun dataset
-    with open('xgb_model_calo_info.pkl', 'rb') as f:
+    with open('ML_models\\xgb_model2_calo_info.pkl', 'rb') as f:
             xgb_model = pickle.load(f)
     train_pred = xgb_model.predict(training_data)
     val_pred = xgb_model.predict(validation_data)
@@ -174,6 +174,24 @@ if __name__ == '__main__':
     feat_imp.plot(kind='bar', title='Feature Importances')
     plt.ylabel('Feature Importance Score')
 
+    TN, FP, FN, TP = confusion_matrix(training_labels, train_pred).ravel()
+    
+    # Sensitivity, hit rate, recall, or true positive rate
+    TPR = TP/(TP+FN)
+    # Specificity or true negative rate
+    TNR = TN/(TN+FP) 
+    # Precision or positive predictive value
+    PPV = TP/(TP+FP)
+    # Negative predictive value
+    NPV = TN/(TN+FN)
+    # Fall out or false positive rate
+    FPR = FP/(FP+TN)
+    # False negative rate
+    FNR = FN/(TP+FN)
+    # False discovery rate
+    FDR = FP/(TP+FP)
 
+    # Overall accuracy
+    ACC = (TP+TN)/(TP+FP+FN+TN)
 
 
