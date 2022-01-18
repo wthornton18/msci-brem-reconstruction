@@ -7,8 +7,8 @@ import hist
 
 plt.rcParams['axes.xmargin'] = 0
 
-infilename = 'bremreco_mmccann/data/Bu2JpsiK_ee_1000_events.root:tuple/tuple'
-tree = up.open(infilename)
+infilename = 'C:\\Users\Rashi\\Documents\\MSci_project\\rashid_test\\data\\Bu2JpsiK_ee_1000_events.root'
+tree = up.open(infilename)['tuple/tuple']
 branches = tree.arrays()
 #trueK = vector.zip({'px':branches['K_PX'],'py':branches['K_PY'],'pz':branches['K_PZ'],'m':branches['K_M']})
 
@@ -44,7 +44,7 @@ for ievent in tqdm(range(1000)):
     for ibrem in range(branchesE.nBremPhotons):
         if branchesE.BremPhoton_OVZ[ibrem] > 5000:
             continue
-        trueBrem = vector.zip({'px':branchesE.BremPhoton_PX[ibrem],'py':branchesE.BremPhoton_PY[ibrem],'pz':branchesE.BremPhoton_PZ[ibrem],'m':branchesE.BremPhoton_PX[ibrem]})
+        trueBrem = vector.zip({'px':branchesE.BremPhoton_PX[ibrem],'py':branchesE.BremPhoton_PY[ibrem],'pz':branchesE.BremPhoton_PZ[ibrem],'m':branchesE.BremPhoton_M[ibrem]})
         eplus_newreco = eplus_newreco + trueBrem
     
     eplus_stdreco = vector.zip({'px':branchesE.StdBremReco_Electron_PX, 'py':branchesE.StdBremReco_Electron_PY, 'pz':branchesE.StdBremReco_Electron_PZ, 'mass':branchesE.StdBremReco_Electron_M})
@@ -62,7 +62,7 @@ for ievent in tqdm(range(1000)):
     for ibrem in range(branchesO.nBremPhotons):
         if branchesO.BremPhoton_OVZ[ibrem] > 5000:
             continue
-        trueBrem = vector.zip({'px':branchesO.BremPhoton_PX[ibrem],'py':branchesO.BremPhoton_PY[ibrem],'pz':branchesO.BremPhoton_PZ[ibrem],'m':branchesO.BremPhoton_PX[ibrem]})
+        trueBrem = vector.zip({'px':branchesO.BremPhoton_PX[ibrem],'py':branchesO.BremPhoton_PY[ibrem],'pz':branchesO.BremPhoton_PZ[ibrem],'m':branchesO.BremPhoton_M[ibrem]})
         eminus_newreco = eminus_newreco + trueBrem
 
 
@@ -92,12 +92,12 @@ hJPsimass_noreco = np.abs(np.array(hJPsimass_noreco))
 hJPsimass_newreco = np.abs(np.array(hJPsimass_newreco))
 hJPsimass_stdreco = np.abs(np.array(hBmass_stdreco))
 
+# THIS IS DIFFERENT
 
 
 
-
-# plt.hist([hBmass_noreco,hBmass_newreco,hBmass_stdreco], bins = 50,histtype='step',stacked=True, fill=False, range =(3000,5600))
-# plt.hist([hJPsimass_noreco,hJPsimass_newreco, hJPsimass_stdreco], histtype='step',bins = 50,stacked=True, fill=False, range = (1000,3400))
+plt.hist([hBmass_noreco,hBmass_newreco,hBmass_stdreco], bins = 50,histtype='step',stacked=True, fill=False, range =(3000,5600))
+plt.hist([hJPsimass_noreco,hJPsimass_newreco, hJPsimass_stdreco], histtype='step',bins = 50,stacked=True, fill=False, range = (1000,3400))
 
 
 
