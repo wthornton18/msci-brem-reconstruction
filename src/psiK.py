@@ -1,99 +1,24 @@
-from copy import deepcopy
+from copy import copy, deepcopy
 from ctypes import Union
 from dataclasses import dataclass
 from pprint import pprint
 from time import time
 from typing import Dict, Iterable, List, Optional, Tuple
+import matplotlib
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import RocCurveDisplay
 from tqdm import tqdm
 import uproot
 from uproot import TBranch, ReadOnlyFile, TTree
 import matplotlib.pyplot as plt
 import numpy as np
-from pylorentz import Momentum4
 from tqdm.contrib import tzip
 from itertools import compress, islice, chain
 from random import sample
-
-
-def ichunked(seq, chunksize):
-    """Yields items from an iterator in iterable chunks."""
-    it = iter(seq)
-    while True:
-        try:
-            yield chain([next(it)], islice(it, chunksize - 1))
-        except StopIteration:
-            return
-
-
-def chunked(seq, chunksize=2):
-    """Yields items from an iterator in list chunks."""
-    for chunk in ichunked(seq, chunksize):
-        yield list(chunk)
-
-
-class Vector3:
-    def __init__(self, *x):
-        if len(x) == 1 and isinstance(x[0], Vector3):
-            x = x[0]
-            self._values = np.array(x.components)
-        elif len(x) == 3:
-            self._values = np.array(list(x))
-        else:
-            raise TypeError("3-vector expects 3 values")
-
-    def __repr__(self):
-        if self._values.ndim == 1:
-            pattern = "%g"
-        else:
-            pattern = "%r"
-
-        return "%s(%s)" % (self.__class__.__name__, ", ".join([pattern % _ for _ in self._values]))
-
-    def __sub__(self, other):
-
-        vector = self.__class__(self)
-        vector -= other
-        return vector
-
-    def __isub__(self, other):
-        self._values = self.components - Vector3(*other).components
-        return self
-
-    def __iter__(self):
-        return iter(self._values)
-
-    @property
-    def components(self):
-        return self._values
-
-    @property
-    def trans(self):
-        return np.sqrt(self._values[0] ** 2 + self._values[1] ** 2)
-
-    @property
-    def phi(self):
-        return np.arctan2(self._values[1], self._values[0])
-
-    @property
-    def theta(self):
-        return np.arctan2(self.trans, self._values[2])
-
-
-class Position3(Vector3):
-    @property
-    def x(self):
-        return self[0]
-
-    @property
-    def y(self):
-        return self[1]
-
-    @property
-    def z(self):
-        return self[2]
+from collections import namedtuple
+from utils import Position3, chunked, Momentum4, named_zip, data
 
 
 @dataclass(eq=False)
@@ -119,13 +44,13 @@ class DataInterface:
     def process_data(self, data: Dict):
         self._id = data["id"]
 
-        electron_plus_eta = data["e_plus_eta"]
-        electron_plus_phi = data["e_plus_phi"]
-        electron_plus_pt = data["e_plus_pt"]
+        electron_plus_px = data["e_plus_px"]
+        electron_plus_py = data["e_plus_py"]
+        electron_plus_pz = data["e_plus_pz"]
         electron_plus_m = data["e_plus_m"]
 
-        self.electron_plus_momentum = Momentum4.m_eta_phi_pt(
-            electron_plus_m, electron_plus_eta, electron_plus_phi, electron_plus_pt
+        self.electron_plus_momentum = Momentum4.m_px_py_pz(
+            electron_plus_m, electron_plus_px, electron_plus_py, electron_plus_pz
         )
 
         electron_plus_x = data["e_plus_x"]
@@ -134,13 +59,13 @@ class DataInterface:
 
         self.electron_plus_position = Position3(electron_plus_x, electron_plus_y, electron_plus_z)
 
-        electron_minus_eta = data["e_minus_eta"]
-        electron_minus_phi = data["e_minus_phi"]
-        electron_minus_pt = data["e_minus_pt"]
+        electron_minus_px = data["e_minus_px"]
+        electron_minus_py = data["e_minus_py"]
+        electron_minus_pz = data["e_minus_pz"]
         electron_minus_m = data["e_minus_m"]
 
-        self.electron_minus_momentum = Momentum4.m_eta_phi_pt(
-            electron_minus_m, electron_minus_eta, electron_minus_phi, electron_minus_pt
+        self.electron_minus_momentum = Momentum4.m_px_py_pz(
+            electron_minus_m, electron_minus_px, electron_minus_py, electron_minus_pz
         )
         electron_minus_x = data["e_minus_x"]
         electron_minus_y = data["e_minus_y"]
@@ -148,43 +73,41 @@ class DataInterface:
 
         self.electron_minus_position = Position3(electron_minus_x, electron_minus_y, electron_minus_z)
 
-        jpsi_eta = data["jpsi_eta"]
-        jpsi_phi = data["jpsi_phi"]
-        jpsi_pt = data["jpsi_pt"]
+        jpsi_px = data["jpsi_px"]
+        jpsi_py = data["jpsi_py"]
+        jpsi_pz = data["jpsi_pz"]
         jpsi_m = data["jpsi_m"]
 
-        self.jpsi_momentum = Momentum4.m_eta_phi_pt(jpsi_m, jpsi_eta, jpsi_phi, jpsi_pt)
+        self.jpsi_momentum = Momentum4.m_px_py_pz(jpsi_m, jpsi_px, jpsi_py, jpsi_pz)
 
-        b_eta = data["b_eta"]
-        b_phi = data["b_phi"]
-        b_pt = data["b_pt"]
+        b_px = data["b_px"]
+        b_py = data["b_py"]
+        b_pz = data["b_pz"]
         b_m = data["b_m"]
 
-        self.b_momentum = Momentum4.m_eta_phi_pt(b_m, b_eta, b_phi, b_pt)
+        self.b_momentum = Momentum4.m_px_py_pz(b_m, b_px, b_py, b_pz)
 
-        k_eta = data["k_eta"]
-        k_phi = data["k_phi"]
-        k_pt = data["k_pt"]
+        k_px = data["k_px"]
+        k_py = data["k_py"]
+        k_pz = data["k_pz"]
         k_m = data["k_m"]
 
-        self.k_momentum = Momentum4.m_eta_phi_pt(k_m, k_eta, k_phi, k_pt)
+        self.k_momentum = Momentum4.m_px_py_pz(k_m, k_px, k_py, k_pz)
 
-        std_e_plus_eta = data["std_electron_plus_eta"]
-        std_e_plus_phi = data["std_electron_plus_phi"]
-        std_e_plus_pt = data["std_electron_plus_pt"]
+        std_e_plus_px = data["std_electron_plus_px"]
+        std_e_plus_py = data["std_electron_plus_py"]
+        std_e_plus_pz = data["std_electron_plus_pz"]
         std_e_plus_e = data["std_electron_plus_e"]
 
-        self.std_electron_plus_momentum = Momentum4.e_eta_phi_pt(
-            std_e_plus_e, std_e_plus_eta, std_e_plus_phi, std_e_plus_pt
-        )
+        self.std_electron_plus_momentum = Momentum4(std_e_plus_e, std_e_plus_px, std_e_plus_py, std_e_plus_pz)
 
-        std_e_minus_eta = data["std_electron_minus_eta"]
-        std_e_minus_phi = data["std_electron_minus_phi"]
-        std_e_minus_pt = data["std_electron_minus_pt"]
+        std_e_minus_px = data["std_electron_minus_px"]
+        std_e_minus_py = data["std_electron_minus_py"]
+        std_e_minus_pz = data["std_electron_minus_pz"]
         std_e_minus_e = data["std_electron_minus_e"]
 
-        self.std_electron_minus_momentum = Momentum4.e_eta_phi_pt(
-            std_e_minus_e, std_e_minus_eta, std_e_minus_phi, std_e_minus_pt
+        self.std_electron_minus_momentum = Momentum4(
+            std_e_minus_e, std_e_minus_px, std_e_minus_py, std_e_minus_pz
         )
 
         brem_plus_positions = []
@@ -193,12 +116,12 @@ class DataInterface:
             brem_x = brem_data["x"]
             brem_y = brem_data["y"]
             brem_z = brem_data["z"]
-            brem_phi = brem_data["phi"]
-            brem_eta = brem_data["eta"]
-            brem_pt = brem_data["pt"]
+            brem_py = brem_data["py"]
+            brem_px = brem_data["px"]
+            brem_pz = brem_data["pz"]
             brem_e = brem_data["e"]
             brem_plus_positions.append(Position3(brem_x, brem_y, brem_z))
-            brem_plus_momenta.append(Momentum4.e_eta_phi_pt(brem_e, brem_eta, brem_phi, brem_pt))
+            brem_plus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
         self.brem_plus_momenta = brem_plus_momenta
         self.brem_plus_positions = brem_plus_positions
 
@@ -208,12 +131,12 @@ class DataInterface:
             brem_x = brem_data["x"]
             brem_y = brem_data["y"]
             brem_z = brem_data["z"]
-            brem_phi = brem_data["phi"]
-            brem_eta = brem_data["eta"]
-            brem_pt = brem_data["pt"]
+            brem_py = brem_data["py"]
+            brem_px = brem_data["px"]
+            brem_pz = brem_data["pz"]
             brem_e = brem_data["e"]
             brem_minus_positions.append(Position3(brem_x, brem_y, brem_z))
-            brem_minus_momenta.append(Momentum4.e_eta_phi_pt(brem_e, brem_eta, brem_phi, brem_pt))
+            brem_minus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
         self.brem_minus_momenta = brem_minus_momenta
         self.brem_minus_positions = brem_minus_positions
 
@@ -298,10 +221,10 @@ class DataInterface:
 
     @property
     def jpsi_truereco(self) -> Momentum4:
-        eplus_true_reco = self.electron_plus_momentum
+        eplus_true_reco = copy(self.electron_plus_momentum)
         for brem_momentum in self.brem_plus_momenta:
             eplus_true_reco += brem_momentum
-        eminus_true_reco = self.electron_minus_momentum
+        eminus_true_reco = copy(self.electron_minus_momentum)
         for brem_momentum in self.brem_minus_momenta:
             eminus_true_reco += brem_momentum
         return eplus_true_reco + eminus_true_reco
@@ -322,15 +245,35 @@ class DataInterface:
     def b_truereco(self) -> Momentum4:
         return self.k_momentum + self.jpsi_momentum
 
+    def jpsi_ourreco(self, classifier: XGBClassifier) -> Momentum4:
+        full_brem_pos = deepcopy(self.brem_minus_positions)
+        full_brem_momentum = deepcopy(self.brem_minus_momenta)
+        full_brem_pos.extend(self.brem_plus_positions)
+        full_brem_momentum.extend(self.brem_plus_momenta)
+        plus_df = self.generate_data_slice(
+            self.electron_plus_momentum, self.electron_plus_position, full_brem_momentum, full_brem_pos
+        )
 
-def generate_mass_curve(data: List[DataInterface]):
-    hbmass_noreco = [m4.b_noreco.m[0] for m4 in data]
-    hbmass_stdreco = [m4.b_stdreco.m[0] for m4 in data]
-    hbmass_truereco = [m4.b_truereco_from_electron.m[0] for m4 in data]
+        minus_df = self.generate_data_slice(
+            self.electron_minus_momentum, self.electron_minus_position, full_brem_momentum, full_brem_pos
+        )
+        plus_arr = plus_df.to_numpy()
+        minus_arr = minus_df.to_numpy()
+        plus_predictions: List[bool] = classifier.predict(plus_arr) == 1
+        minus_predictions: List[bool] = classifier.predict(minus_arr) == 1
+        plus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, plus_predictions))
+        minus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, minus_predictions))
+        e_plus_reco = copy(self.electron_plus_momentum)
+        for brem_momentum in plus_brem_momentum:
+            e_plus_reco += brem_momentum
+        e_minus_reco = self.electron_minus_momentum
+        for brem_momentum in copy(minus_brem_momentum):
+            e_minus_reco += brem_momentum
 
-    jspimass_noreco = [m4.jpsi_noreco.m[0] for m4 in data]
-    jspimass_stdreco = [m4.jpsi_stdreco.m[0] for m4 in data]
-    jspimass_truereco = [m4.jpsi_truereco.m[0] for m4 in data]
+        return e_plus_reco + e_minus_reco
+
+    def b_ourreco(self, classifier: XGBClassifier) -> Momentum4:
+        return self.jpsi_ourreco(classifier=classifier) + self.k_momentum
 
 
 def get_names(filename: str):
@@ -340,25 +283,25 @@ def get_names(filename: str):
         print(tree.keys())
 
 
-def generate_brem_data(x, y, z, eta, phi, pt, e):
+def generate_brem_data(x, y, z, px, py, pz, e):
     x = list(x)
     y = list(y)
     z = list(z)
-    eta = list(eta)
-    phi = list(phi)
-    pt = list(pt)
+    px = list(px)
+    py = list(py)
+    pz = list(pz)
     e = list(e)
     return [
         {
             "x": data[0],
             "y": data[1],
             "z": data[2],
-            "eta": data[3],
-            "phi": data[4],
-            "pt": data[5],
+            "px": data[3],
+            "py": data[4],
+            "pz": data[5],
             "e": data[6],
         }
-        for data in zip(x, y, z, eta, phi, pt, e)
+        for data in zip(x, y, z, px, py, pz, e)
     ]
 
 
@@ -366,39 +309,43 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
     with uproot.open(filename) as file:
         tree: Dict[str, TBranch] = file["tuple/tuple;1"]
         data_interfaces = []
+        data_extract = lambda d, keys: list(map(lambda k: d[k], keys))
         for i, (e_plus_data, e_minus_data) in enumerate(
             chunked(
-                zip(
-                    tree["ElectronTrack_ETA"].array(),
-                    tree["ElectronTrack_PHI"].array(),
-                    tree["ElectronTrack_PT"].array(),
+                named_zip(
+                    data,  # named tuple type
+                    tree["EventNumber"].array(),
+                    tree["ElectronTrack_PX"].array(),
+                    tree["ElectronTrack_PY"].array(),
+                    tree["ElectronTrack_PZ"].array(),
                     tree["electron_M"].array(),
                     tree["ElectronTrack_X"].array(),
                     tree["ElectronTrack_Y"].array(),
                     tree["ElectronTrack_Z"].array(),
-                    tree["JPsi_ETA"].array(),
-                    tree["JPsi_PHI"].array(),
-                    tree["JPsi_PT"].array(),
+                    tree["JPsi_PX"].array(),
+                    tree["JPsi_PY"].array(),
+                    tree["JPsi_PZ"].array(),
                     tree["JPsi_M"].array(),
-                    tree["B_ETA"].array(),
-                    tree["B_PHI"].array(),
-                    tree["B_PT"].array(),
+                    tree["B_PX"].array(),
+                    tree["B_PY"].array(),
+                    tree["B_PZ"].array(),
                     tree["B_M"].array(),
-                    tree["K_ETA"].array(),
-                    tree["K_PHI"].array(),
-                    tree["K_PT"].array(),
+                    tree["K_PX"].array(),
+                    tree["K_PY"].array(),
+                    tree["K_PZ"].array(),
                     tree["K_M"].array(),
-                    tree["StdBremReco_Electron_ETA"].array(),
-                    tree["StdBremReco_Electron_PHI"].array(),
-                    tree["StdBremReco_Electron_PT"].array(),
+                    tree["StdBremReco_Electron_PX"].array(),
+                    tree["StdBremReco_Electron_PY"].array(),
+                    tree["StdBremReco_Electron_PZ"].array(),
                     tree["StdBremReco_Electron_E"].array(),
                     tree["BremCluster_X"].array(),
                     tree["BremCluster_Y"].array(),
                     tree["BremCluster_Z"].array(),
-                    tree["BremPhoton_PHI"].array(),
-                    tree["BremPhoton_ETA"].array(),
-                    tree["BremPhoton_PT"].array(),
+                    tree["BremPhoton_PX"].array(),
+                    tree["BremPhoton_PY"].array(),
+                    tree["BremPhoton_PZ"].array(),
                     tree["BremPhoton_E"].array(),
+                    tree["nBremPhotons"].array(),
                     tree["nElectronTracks"].array(),
                     tree["ElectronTrack_TYPE"].array(),
                 )
@@ -408,56 +355,107 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
             # not a well constructed track
             #    continue
 
+            e_plus_data = e_plus_data._asdict()
+            e_minus_data = e_minus_data._asdict()
             if (
-                e_plus_data[-2] < 1
-                or e_plus_data[-1][0] != 3
-                or e_minus_data[-2] < 1
-                or e_minus_data[-1][0] != 3
+                e_plus_data["nelectrons"] < 1  # some positive electron tracks
+                or e_plus_data["etrack_type"][0]
+                != 3  # the tracks are at least type 3 - hence well reconstructed
+                or e_plus_data["nbrems"] < 1  # at least a single brem photon
+                or e_minus_data["nelectrons"] < 1  # some negative electron tracks
+                or e_minus_data["etrack_type"][0]
+                != 3  # the tracks are at least type 3 - hence well reconstructed
+                or e_minus_data["nbrems"] < 1  # at least a single brem photon
             ):
                 continue
-            # e_plus_data = data[0]
             # e_minus_data = data[1]
             data_dict = {
-                "id": i,
-                "e_plus_eta": e_plus_data[0][0],
-                "e_plus_phi": e_plus_data[1][0],
-                "e_plus_pt": e_plus_data[2][0],
-                "e_plus_m": e_plus_data[3],
-                "e_plus_x": e_plus_data[4][0],
-                "e_plus_y": e_plus_data[5][0],
-                "e_plus_z": e_plus_data[6][0],
-                "e_minus_eta": e_minus_data[0][0],
-                "e_minus_phi": e_minus_data[1][0],
-                "e_minus_pt": e_minus_data[2][0],
-                "e_minus_m": e_minus_data[3],
-                "e_minus_x": e_minus_data[4][0],
-                "e_minus_y": e_minus_data[5][0],
-                "e_minus_z": e_minus_data[6][0],
-                "jpsi_eta": e_plus_data[7],
-                "jpsi_phi": e_plus_data[8],
-                "jpsi_pt": e_plus_data[9],
-                "jpsi_m": e_plus_data[10],
-                "b_eta": e_plus_data[11],
-                "b_phi": e_plus_data[12],
-                "b_pt": e_plus_data[13],
-                "b_m": e_plus_data[14],
-                "k_eta": e_plus_data[15],
-                "k_phi": e_plus_data[16],
-                "k_pt": e_plus_data[17],
-                "k_m": e_plus_data[18],
-                "std_electron_plus_eta": e_plus_data[19],
-                "std_electron_plus_phi": e_plus_data[20],
-                "std_electron_plus_pt": e_plus_data[21],
-                "std_electron_plus_e": e_plus_data[22],
-                "std_electron_minus_eta": e_minus_data[19],
-                "std_electron_minus_phi": e_minus_data[20],
-                "std_electron_minus_pt": e_minus_data[21],
-                "std_electron_minus_e": e_minus_data[22],
-                "brem_plus_data": generate_brem_data(*e_plus_data[23:30]),
-                "brem_minus_data": generate_brem_data(*e_minus_data[23:30]),
+                "id": e_plus_data["event_number"],
+                "e_plus_px": e_plus_data["e_px"][0],
+                "e_plus_py": e_plus_data["e_py"][0],
+                "e_plus_pz": e_plus_data["e_pz"][0],
+                "e_plus_m": e_plus_data["e_m"],
+                "e_plus_x": e_plus_data["e_x"][0],
+                "e_plus_y": e_plus_data["e_y"][0],
+                "e_plus_z": e_plus_data["e_z"][0],
+                "e_minus_px": e_minus_data["e_px"][0],
+                "e_minus_py": e_minus_data["e_py"][0],
+                "e_minus_pz": e_minus_data["e_pz"][0],
+                "e_minus_m": e_minus_data["e_m"],
+                "e_minus_x": e_minus_data["e_x"][0],
+                "e_minus_y": e_minus_data["e_y"][0],
+                "e_minus_z": e_minus_data["e_z"][0],
+                "jpsi_px": e_plus_data["j_px"],
+                "jpsi_py": e_plus_data["j_py"],
+                "jpsi_pz": e_plus_data["j_pz"],
+                "jpsi_m": e_plus_data["j_m"],
+                "b_px": e_plus_data["b_px"],
+                "b_py": e_plus_data["b_py"],
+                "b_pz": e_plus_data["b_pz"],
+                "b_m": e_plus_data["b_m"],
+                "k_px": e_plus_data["k_px"],
+                "k_py": e_plus_data["k_py"],
+                "k_pz": e_plus_data["k_pz"],
+                "k_m": e_plus_data["k_m"],
+                "std_electron_plus_px": e_plus_data["std_e_px"],
+                "std_electron_plus_py": e_plus_data["std_e_py"],
+                "std_electron_plus_pz": e_plus_data["std_e_pz"],
+                "std_electron_plus_e": e_plus_data["std_e_e"],
+                "std_electron_minus_px": e_minus_data["std_e_px"],
+                "std_electron_minus_py": e_minus_data["std_e_py"],
+                "std_electron_minus_pz": e_minus_data["std_e_pz"],
+                "std_electron_minus_e": e_minus_data["std_e_e"],
+                "brem_plus_data": generate_brem_data(
+                    *data_extract(
+                        e_plus_data, ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e"]
+                    )
+                ),
+                "brem_minus_data": generate_brem_data(
+                    *data_extract(
+                        e_minus_data,
+                        ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e"],
+                    )
+                ),
             }
             d = DataInterface(deepcopy(data_dict))
             data_interfaces.append(d)
+        """
+        print(d.std_electron_plus_momentum)
+        print(stdelec)
+        print(d.brem_plus_momenta)
+        print(brem)
+        print([brem.m for brem in d.brem_plus_momenta])
+        print("----")
+
+        print(list(brem_out[4]))
+        print([brem.eta for brem in d.brem_plus_momenta])
+        print(list(brem_out[5]))
+        print([brem.phi for brem in d.brem_plus_momenta])
+        print(list(brem_out[6]))
+        print([brem.p_t for brem in d.brem_plus_momenta])
+        print(list(brem_out[7]))
+        print([brem.e for brem in d.brem_plus_momenta])
+        print(jpsi)
+        """
+        print(d.std_electron_plus_momentum)
+        print(d.std_electron_minus_momentum)
+        print((d.std_electron_plus_momentum + d.std_electron_minus_momentum).m)
+        print(d.electron_plus_momentum)
+        print(d.electron_minus_momentum)
+        print((d.electron_plus_momentum + d.electron_minus_momentum).m)
+        e_plus = deepcopy(d.electron_plus_momentum)
+        for brem in d.brem_plus_momenta:
+            e_plus += brem
+        e_minus = deepcopy(d.electron_minus_momentum)
+        for brem in d.brem_minus_momenta:
+            e_minus += brem
+        print(e_plus.m)
+        print(e_minus.m)
+        print((e_minus + e_plus).m)
+        print(d.jpsi_momentum)
+        print(e_plus_data["j_m"])
+        print(e_minus_data["j_m"])
+        print(d.jpsi_stdreco.m)
     return data_interfaces
 
 
@@ -513,6 +511,96 @@ def train_classifier(
     gbc = GradientBoostingClassifier(learning_rate=res.learning_rate[0], n_estimators=res.n_estimators[0])
     gbc.fit(training_data, train_labels)
     return gbc
+
+
+def train_xgboost(
+    training_data: np.ndarray,
+    training_labels: np.ndarray,
+    validation_data: np.ndarray,
+    validation_labels: np.ndarray,
+):
+    xgb = XGBClassifier()
+    xgb.fit(training_data, training_labels)
+    return xgb
+
+
+def plot_xgboost_histo(
+    xgb: XGBClassifier,
+    training_data: np.ndarray,
+    training_labels: np.ndarray,
+    validation_data: np.ndarray,
+    validation_labels: np.ndarray,
+):
+    train_acc = 100 * (sum(xgb.predict(training_data) == training_labels) / training_data.shape[0])
+    val_acc = 100 * (sum(xgb.predict(validation_data) == validation_labels) / validation_data.shape[0])
+    print(train_acc)
+    print(val_acc)
+
+    classifier_training_s = xgb.predict(training_data[training_labels == 1], output_margin=True)
+    classifier_training_b = xgb.predict(training_data[training_labels == 0], output_margin=True)
+    classifier_testing_s = xgb.predict(validation_data[validation_labels == 1], output_margin=True)
+    classifier_testing_b = xgb.predict(validation_data[validation_labels == 0], output_margin=True)
+
+    c_min = -10
+    c_max = 10
+
+    histo_training_s = np.histogram(classifier_training_s, bins=40, range=(c_min, c_max), density=True)
+    histo_training_b = np.histogram(classifier_training_b, bins=40, range=(c_min, c_max), density=True)
+    histo_testing_s = np.histogram(classifier_testing_s, bins=40, range=(c_min, c_max), density=True)
+    histo_testing_b = np.histogram(classifier_testing_b, bins=40, range=(c_min, c_max), density=True)
+
+    all_histos: List[np.histogram] = [
+        histo_training_s,
+        histo_training_b,
+        histo_testing_s,
+        histo_testing_b,
+    ]
+    h_max = max([histo[0].max() for histo in all_histos]) * 1.2
+    h_min = max([histo[0].min() for histo in all_histos])
+    bin_edges = histo_training_s[1]
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_widths = bin_edges[1:] - bin_edges[:-1]
+    ax1 = plt.subplot(111)
+
+    # Draw solid histograms for the training data
+    ax1.bar(
+        bin_centers - bin_widths / 2.0,
+        histo_training_s[0],
+        facecolor="blue",
+        linewidth=0,
+        width=bin_widths,
+        label="S (Train)",
+        alpha=0.5,
+    )
+    ax1.bar(
+        bin_centers - bin_widths / 2.0,
+        histo_training_b[0],
+        facecolor="red",
+        linewidth=0,
+        width=bin_widths,
+        label="B (Train)",
+        alpha=0.5,
+    )
+
+    # # Draw error-bar histograms for the testing data
+    ax1.plot(bin_centers - bin_widths / 2, histo_testing_s[0], "bx", label="S (Test)")
+    ax1.plot(bin_centers - bin_widths / 2, histo_testing_b[0], "rx", label="B (Test)")
+
+    # Make a colorful backdrop to show the clasification regions in red and blue
+
+    # Adjust the axis boundaries (just cosmetic)
+    ax1.axis([c_min, c_max, h_min, h_max])
+
+    # Make labels and title
+    plt.title("Classification with scikit-learn")
+    plt.xlabel("Classifier, GBC")
+    plt.ylabel("Counts/Bin")
+    # Make legend with small font
+    legend = ax1.legend(loc="upper center", shadow=True, ncol=2)
+    for alabel in legend.get_texts():
+        alabel.set_fontsize("small")
+
+    plt.show()
 
 
 def plot_roc(
@@ -601,10 +689,62 @@ def plot_histo(
     plt.show()
 
 
+def generate_hist_features(data: np.ndarray, range: Tuple[float, float]):
+    histo = np.histogram(data, range=range, density=True)
+    bin_edges = histo
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_widths = bin_edges[1:] - bin_edges[:-1]
+    return bin_widths, bin_centers
+
+
+def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
+    jpsi_noreco = []
+    jpsi_truereco = []
+    jpsi_stdreco = []
+    jpsi_ourreco = []
+
+    b_noreco = []
+    b_truereco = []
+    b_stdreco = []
+    b_ourreco = []
+    for d in data:
+        jpsi_noreco.append(d.jpsi_noreco.m)
+        jpsi_truereco.append(d.jpsi_truereco.m)
+        jpsi_stdreco.append(d.jpsi_stdreco.m)
+        jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier).m)
+
+        b_noreco.append(d.b_noreco)
+        b_truereco.append(d.b_truereco_from_electron.m)
+        b_stdreco.append(d.b_stdreco.m)
+        b_ourreco.append(d.b_ourreco(classifier=classifier).m)
+    print(np.mean(jpsi_stdreco))
+    print(np.mean(jpsi_truereco))
+    print(np.mean(jpsi_ourreco))
+    print(np.shape(b_stdreco))
+
+    fig, axes = plt.subplots(nrows=2, ncols=1)
+
+    axes[0].hist(jpsi_noreco, label="no reco", alpha=0.5, range=(800, 8000), bins=20)
+    axes[0].hist(jpsi_truereco, label="true reco", alpha=0.5, range=(800, 8000), bins=20)
+    axes[0].hist(jpsi_stdreco, label="std reco", alpha=0.5, range=(800, 8000), bins=20)
+    axes[0].hist(jpsi_ourreco, label="our reco", alpha=0.5, range=(800, 8000), bins=20)
+
+    axes[1].hist(b_noreco, label="no reco", alpha=0.5, range=(1600, 16000), bins=20)
+    axes[1].hist(b_truereco, label="true reco", alpha=0.5, range=(1600, 16000), bins=20)
+    axes[1].hist(b_stdreco, label="std reco", alpha=0.5, range=(1600, 16000), bins=20)
+    axes[1].hist(b_ourreco, label="our reco", alpha=0.5, range=(1600, 16000), bins=20)
+
+    axes[0].legend()
+    axes[1].legend()
+    axes[0].set_xlabel(r"$m_{J/psi}$ [MeV]")
+    axes[1].set_xlabel(r"$m_{M}$ [MeV]")
+    plt.show()
+
+
 if __name__ == "__main__":
     get_names("psiK_1000.root")
     out = generate_data_interface("psiK_1000.root")
     data = generate_data_mixing(out)
     training_data, training_labels, validation_data, validation_labels = generate_prepared_data(data)
-    gbc = train_classifier(training_data, training_labels, validation_data, validation_labels)
-    plot_histo(gbc, training_data, training_labels, validation_data, validation_labels)
+    xgb = train_xgboost(training_data, training_labels, validation_data, validation_labels)
+    plot_masses(xgb, out)
