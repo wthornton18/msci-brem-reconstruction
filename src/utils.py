@@ -46,6 +46,7 @@ data = namedtuple(
         "brem_py",
         "brem_pz",
         "brem_e",
+        "brem_ovz",
         "nbrems",
         "nelectrons",
         "etrack_type",

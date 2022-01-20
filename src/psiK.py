@@ -283,7 +283,7 @@ def get_names(filename: str):
         print(tree.keys())
 
 
-def generate_brem_data(x, y, z, px, py, pz, e):
+def generate_brem_data(x, y, z, px, py, pz, e, ovz):
     x = list(x)
     y = list(y)
     z = list(z)
@@ -291,6 +291,7 @@ def generate_brem_data(x, y, z, px, py, pz, e):
     py = list(py)
     pz = list(pz)
     e = list(e)
+    ovz = list(ovz)
     return [
         {
             "x": data[0],
@@ -301,7 +302,8 @@ def generate_brem_data(x, y, z, px, py, pz, e):
             "pz": data[5],
             "e": data[6],
         }
-        for data in zip(x, y, z, px, py, pz, e)
+        for data in zip(x, y, z, px, py, pz, e, ovz)
+        if data[7] <= 5000
     ]
 
 
@@ -345,6 +347,7 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
                     tree["BremPhoton_PY"].array(),
                     tree["BremPhoton_PZ"].array(),
                     tree["BremPhoton_E"].array(),
+                    tree["BremPhoton_OVZ"].array(),
                     tree["nBremPhotons"].array(),
                     tree["nElectronTracks"].array(),
                     tree["ElectronTrack_TYPE"].array(),
@@ -369,6 +372,21 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
             ):
                 continue
             # e_minus_data = data[1]
+            brem_plus_data = generate_brem_data(
+                *data_extract(
+                    e_plus_data,
+                    ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e", "brem_ovz"],
+                )
+            )
+            brem_minus_data = generate_brem_data(
+                *data_extract(
+                    e_minus_data,
+                    ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e", "brem_ovz"],
+                )
+            )
+            if len(brem_plus_data) == 0 and len(brem_minus_data) == 0:
+                continue
+
             data_dict = {
                 "id": e_plus_data["event_number"],
                 "e_plus_px": e_plus_data["e_px"][0],
@@ -405,17 +423,8 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
                 "std_electron_minus_py": e_minus_data["std_e_py"],
                 "std_electron_minus_pz": e_minus_data["std_e_pz"],
                 "std_electron_minus_e": e_minus_data["std_e_e"],
-                "brem_plus_data": generate_brem_data(
-                    *data_extract(
-                        e_plus_data, ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e"]
-                    )
-                ),
-                "brem_minus_data": generate_brem_data(
-                    *data_extract(
-                        e_minus_data,
-                        ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e"],
-                    )
-                ),
+                "brem_plus_data": brem_plus_data,
+                "brem_minus_data": brem_minus_data,
             }
             d = DataInterface(deepcopy(data_dict))
             data_interfaces.append(d)
