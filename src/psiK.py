@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import matplotlib
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 from sklearn.metrics import RocCurveDisplay
 from tqdm import tqdm
 import uproot
@@ -19,6 +19,7 @@ from itertools import compress, islice, chain
 from random import sample
 from collections import namedtuple
 from utils import Position3, chunked, Momentum4, named_zip, data
+from scipy.optimize import minimize, basinhopping
 
 
 @dataclass(eq=False)
@@ -29,8 +30,10 @@ class DataInterface:
     electron_minus_momentum: Momentum4
     electron_minus_position: Position3
     brem_plus_momenta: List[Momentum4]
+    true_brem_plus_momenta: List[Momentum4]
     brem_plus_positions: List[Position3]
     brem_minus_momenta: List[Momentum4]
+    true_brem_minus_momenta: List[Momentum4]
     brem_minus_positions: List[Position3]
     std_electron_minus_momentum: Momentum4
     std_electron_plus_momentum: Momentum4
@@ -112,6 +115,7 @@ class DataInterface:
 
         brem_plus_positions = []
         brem_plus_momenta = []
+        true_brem_plus_momenta = []
         for brem_data in data["brem_plus_data"]:
             brem_x = brem_data["x"]
             brem_y = brem_data["y"]
@@ -120,13 +124,15 @@ class DataInterface:
             brem_px = brem_data["px"]
             brem_pz = brem_data["pz"]
             brem_e = brem_data["e"]
+            brem_plus_momenta.append(reconstruct_brem(brem_x, brem_y, brem_z, brem_data["cluster_e"]))
             brem_plus_positions.append(Position3(brem_x, brem_y, brem_z))
-            brem_plus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
+            true_brem_plus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
         self.brem_plus_momenta = brem_plus_momenta
         self.brem_plus_positions = brem_plus_positions
-
+        self.true_brem_plus_momenta = true_brem_plus_momenta
         brem_minus_positions = []
         brem_minus_momenta = []
+        true_brem_minus_momenta = []
         for brem_data in data["brem_minus_data"]:
             brem_x = brem_data["x"]
             brem_y = brem_data["y"]
@@ -135,10 +141,12 @@ class DataInterface:
             brem_px = brem_data["px"]
             brem_pz = brem_data["pz"]
             brem_e = brem_data["e"]
+            brem_minus_momenta.append(reconstruct_brem(brem_x, brem_y, brem_z, brem_data["cluster_e"]))
             brem_minus_positions.append(Position3(brem_x, brem_y, brem_z))
-            brem_minus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
+            true_brem_minus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
         self.brem_minus_momenta = brem_minus_momenta
         self.brem_minus_positions = brem_minus_positions
+        self.true_brem_minus_momenta = true_brem_minus_momenta
 
     def generate_data_slice(
         self,
@@ -222,10 +230,10 @@ class DataInterface:
     @property
     def jpsi_truereco(self) -> Momentum4:
         eplus_true_reco = copy(self.electron_plus_momentum)
-        for brem_momentum in self.brem_plus_momenta:
+        for brem_momentum in self.true_brem_plus_momenta:
             eplus_true_reco += brem_momentum
         eminus_true_reco = copy(self.electron_minus_momentum)
-        for brem_momentum in self.brem_minus_momenta:
+        for brem_momentum in self.true_brem_minus_momenta:
             eminus_true_reco += brem_momentum
         return eplus_true_reco + eminus_true_reco
 
@@ -283,10 +291,11 @@ def get_names(filename: str):
         print(tree.keys())
 
 
-def generate_brem_data(x, y, z, px, py, pz, e, ovz):
+def generate_brem_data(x, y, z, cluster_e, px, py, pz, e, ovz):
     x = list(x)
     y = list(y)
     z = list(z)
+    cluster_e = list(cluster_e)
     px = list(px)
     py = list(py)
     pz = list(pz)
@@ -297,13 +306,14 @@ def generate_brem_data(x, y, z, px, py, pz, e, ovz):
             "x": data[0],
             "y": data[1],
             "z": data[2],
-            "px": data[3],
-            "py": data[4],
-            "pz": data[5],
-            "e": data[6],
+            "cluster_e": data[3],
+            "px": data[4],
+            "py": data[5],
+            "pz": data[6],
+            "e": data[7],
         }
-        for data in zip(x, y, z, px, py, pz, e, ovz)
-        if data[7] <= 5000
+        for data in zip(x, y, z, cluster_e, px, py, pz, e, ovz)
+        if data[8] <= 5000
     ]
 
 
@@ -343,6 +353,7 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
                     tree["BremCluster_X"].array(),
                     tree["BremCluster_Y"].array(),
                     tree["BremCluster_Z"].array(),
+                    tree["BremCluster_E"].array(),
                     tree["BremPhoton_PX"].array(),
                     tree["BremPhoton_PY"].array(),
                     tree["BremPhoton_PZ"].array(),
@@ -375,13 +386,33 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
             brem_plus_data = generate_brem_data(
                 *data_extract(
                     e_plus_data,
-                    ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e", "brem_ovz"],
+                    [
+                        "brem_x",
+                        "brem_y",
+                        "brem_z",
+                        "brem_cluster_e",
+                        "brem_px",
+                        "brem_py",
+                        "brem_pz",
+                        "brem_e",
+                        "brem_ovz",
+                    ],
                 )
             )
             brem_minus_data = generate_brem_data(
                 *data_extract(
                     e_minus_data,
-                    ["brem_x", "brem_y", "brem_z", "brem_px", "brem_py", "brem_pz", "brem_e", "brem_ovz"],
+                    [
+                        "brem_x",
+                        "brem_y",
+                        "brem_z",
+                        "brem_cluster_e",
+                        "brem_px",
+                        "brem_py",
+                        "brem_pz",
+                        "brem_e",
+                        "brem_ovz",
+                    ],
                 )
             )
             if len(brem_plus_data) == 0 and len(brem_minus_data) == 0:
@@ -428,44 +459,77 @@ def generate_data_interface(filename: str) -> List[DataInterface]:
             }
             d = DataInterface(deepcopy(data_dict))
             data_interfaces.append(d)
-        """
-        print(d.std_electron_plus_momentum)
-        print(stdelec)
-        print(d.brem_plus_momenta)
-        print(brem)
-        print([brem.m for brem in d.brem_plus_momenta])
-        print("----")
-
-        print(list(brem_out[4]))
-        print([brem.eta for brem in d.brem_plus_momenta])
-        print(list(brem_out[5]))
-        print([brem.phi for brem in d.brem_plus_momenta])
-        print(list(brem_out[6]))
-        print([brem.p_t for brem in d.brem_plus_momenta])
-        print(list(brem_out[7]))
-        print([brem.e for brem in d.brem_plus_momenta])
-        print(jpsi)
-        """
-        print(d.std_electron_plus_momentum)
-        print(d.std_electron_minus_momentum)
-        print((d.std_electron_plus_momentum + d.std_electron_minus_momentum).m)
-        print(d.electron_plus_momentum)
-        print(d.electron_minus_momentum)
-        print((d.electron_plus_momentum + d.electron_minus_momentum).m)
-        e_plus = deepcopy(d.electron_plus_momentum)
-        for brem in d.brem_plus_momenta:
-            e_plus += brem
-        e_minus = deepcopy(d.electron_minus_momentum)
-        for brem in d.brem_minus_momenta:
-            e_minus += brem
-        print(e_plus.m)
-        print(e_minus.m)
-        print((e_minus + e_plus).m)
-        print(d.jpsi_momentum)
-        print(e_plus_data["j_m"])
-        print(e_minus_data["j_m"])
-        print(d.jpsi_stdreco.m)
     return data_interfaces
+
+
+C = 3 * (10 ** 8)
+
+
+def reconstruct_brem(x: float, y: float, z: float, e: float, ov=None):
+    if not isinstance(ov, list):
+        ov = [0, 0, 0]
+    xi = x - ov[0]
+    yi = y - ov[0]
+    zi = z - ov[0]
+    mag = np.sqrt(xi ** 2 + yi ** 2 + zi ** 2)
+    ratio = (1 / mag) * e / C
+    return Momentum4(e, xi * ratio, yi * ratio, zi * ratio)
+
+
+def estimate_brem_momentum_variance(filename: str):
+    sub_data_tuple = namedtuple(
+        "sub_data_tuple", ["x", "y", "z", "c_e", "ovx", "ovy", "ovz", "px", "py", "pz", "t_e"]
+    )
+    true: List[Momentum4] = []
+    reco_ov: List[Momentum4] = []
+    reco: List[Momentum4] = []
+    e = []
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        for data in zip(
+            tree["BremCluster_X"].array(),
+            tree["BremCluster_Y"].array(),
+            tree["BremCluster_Z"].array(),
+            tree["BremCluster_E"].array(),
+            tree["BremPhoton_OVX"].array(),
+            tree["BremPhoton_OVY"].array(),
+            tree["BremPhoton_OVZ"].array(),
+            tree["BremPhoton_PX"].array(),
+            tree["BremPhoton_PY"].array(),
+            tree["BremPhoton_PZ"].array(),
+            tree["BremPhoton_E"].array(),
+        ):
+            for brem in named_zip(sub_data_tuple, *data):
+                if brem.ovz > 5000:
+                    continue
+                e.append(brem.c_e)
+                reco.append(reconstruct_brem(brem.x, brem.y, brem.z, brem.c_e))
+                reco_ov.append(
+                    reconstruct_brem(brem.x, brem.y, brem.z, brem.c_e, ov=[brem.ovx, brem.ovy, brem.ovz])
+                )
+                true.append(Momentum4(brem.t_e, brem.px, brem.py, brem.pz))
+    print(np.mean([t.p_x for t in true]))
+    print(np.mean([t.p_y for t in true]))
+    print(np.mean([t.p_z for t in true]))
+    print(np.mean([t.p_x for t in reco]))
+    print(np.mean([t.p_y for t in reco]))
+    print(np.mean([t.p_z for t in reco]))
+    print(np.mean([t.p_x for t in reco_ov]))
+    print(np.mean([t.p_y for t in reco_ov]))
+    print(np.mean([t.p_z for t in reco_ov]))
+    print(np.mean([t.e for t in true]))
+    print(np.mean([t.e for t in reco]))
+    print(np.mean([t.e for t in reco_ov]))
+    print(np.mean(e))
+    print("--------")
+    print(np.mean([np.abs(t.p_x - r.p_x) for t, r in zip(true, reco)]))
+    print(np.mean([np.abs(t.p_y - r.p_y) for t, r in zip(true, reco)]))
+    print(np.mean([np.abs(t.p_z - r.p_z) for t, r in zip(true, reco)]))
+    print(np.mean([np.abs(t.e - r.e) for t, r in zip(true, reco)]))
+    print(np.mean([np.abs(t.p_x - r.p_x) for t, r in zip(true, reco_ov)]))
+    print(np.mean([np.abs(t.p_y - r.p_y) for t, r in zip(true, reco_ov)]))
+    print(np.mean([np.abs(t.p_z - r.p_z) for t, r in zip(true, reco_ov)]))
+    print(np.mean([np.abs(t.e - r.e) for t, r in zip(true, reco_ov)]))
 
 
 def generate_data_mixing(data: List[DataInterface], sampling_frac: int = 2) -> pd.DataFrame:
@@ -530,6 +594,10 @@ def train_xgboost(
 ):
     xgb = XGBClassifier()
     xgb.fit(training_data, training_labels)
+    train_acc = 100 * (sum(xgb.predict(training_data) == training_labels) / training_data.shape[0])
+    val_acc = 100 * (sum(xgb.predict(validation_data) == validation_labels) / validation_data.shape[0])
+    print(train_acc)
+    print(val_acc)
     return xgb
 
 
@@ -722,32 +790,40 @@ def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
         jpsi_stdreco.append(d.jpsi_stdreco.m)
         jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier).m)
 
-        b_noreco.append(d.b_noreco)
+        b_noreco.append(d.b_noreco.m)
         b_truereco.append(d.b_truereco_from_electron.m)
         b_stdreco.append(d.b_stdreco.m)
         b_ourreco.append(d.b_ourreco(classifier=classifier).m)
-    print(np.mean(jpsi_stdreco))
-    print(np.mean(jpsi_truereco))
-    print(np.mean(jpsi_ourreco))
-    print(np.shape(b_stdreco))
+    # pprint(b_ourreco)
 
     fig, axes = plt.subplots(nrows=2, ncols=1)
 
-    axes[0].hist(jpsi_noreco, label="no reco", alpha=0.5, range=(800, 8000), bins=20)
-    axes[0].hist(jpsi_truereco, label="true reco", alpha=0.5, range=(800, 8000), bins=20)
-    axes[0].hist(jpsi_stdreco, label="std reco", alpha=0.5, range=(800, 8000), bins=20)
-    axes[0].hist(jpsi_ourreco, label="our reco", alpha=0.5, range=(800, 8000), bins=20)
+    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 3400), bins=20)
+    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 3400), bins=20)
+    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 3400), bins=20)
+    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 3400), bins=20)
 
-    axes[1].hist(b_noreco, label="no reco", alpha=0.5, range=(1600, 16000), bins=20)
-    axes[1].hist(b_truereco, label="true reco", alpha=0.5, range=(1600, 16000), bins=20)
-    axes[1].hist(b_stdreco, label="std reco", alpha=0.5, range=(1600, 16000), bins=20)
-    axes[1].hist(b_ourreco, label="our reco", alpha=0.5, range=(1600, 16000), bins=20)
+    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20)
+    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20)
+    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20)
+    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20)
 
     axes[0].legend()
     axes[1].legend()
     axes[0].set_xlabel(r"$m_{J/psi}$ [MeV]")
-    axes[1].set_xlabel(r"$m_{M}$ [MeV]")
+    axes[1].set_xlabel(r"$m_{B}$ [MeV]")
     plt.show()
+
+
+def eval_and_gen(filename: str, classifier: Optional[XGBClassifier] = None) -> Optional[XGBClassifier]:
+    data_interfaces = generate_data_interface(filename)
+    data = generate_data_mixing(data_interfaces)
+    training_data, training_labels, validation_data, validation_labels = generate_prepared_data(data)
+    if classifier is not None:
+        plot_masses(classifier, data_interfaces)
+    else:
+        classifier = train_xgboost(training_data, training_labels, validation_data, validation_labels)
+        return classifier
 
 
 if __name__ == "__main__":
@@ -757,3 +833,4 @@ if __name__ == "__main__":
     training_data, training_labels, validation_data, validation_labels = generate_prepared_data(data)
     xgb = train_xgboost(training_data, training_labels, validation_data, validation_labels)
     plot_masses(xgb, out)
+    # estimate_brem_momentum_variance("psiK_1000.root")

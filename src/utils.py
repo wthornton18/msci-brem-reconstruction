@@ -42,6 +42,7 @@ data = namedtuple(
         "brem_x",
         "brem_y",
         "brem_z",
+        "brem_cluster_e",
         "brem_px",
         "brem_py",
         "brem_pz",
@@ -143,12 +144,12 @@ class Vector3:
 class Position3(Vector3):
     @property
     def x(self):
-        return self[0]
+        return self._values[0]
 
     @property
     def y(self):
-        return self[1]
+        return self._values[1]
 
     @property
     def z(self):
-        return self[2]
+        return self._values[2]
