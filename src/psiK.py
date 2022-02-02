@@ -1,8 +1,12 @@
 from copy import copy, deepcopy
 from ctypes import Union
 from dataclasses import dataclass
+from functools import partial
+import math
 from pprint import pprint
 from time import time
+import scipy as sp
+from scipy.stats import mode
 from typing import Dict, Iterable, List, Optional, Tuple
 import matplotlib
 import pandas as pd
@@ -476,6 +480,33 @@ def reconstruct_brem(x: float, y: float, z: float, e: float, ov=None):
     return Momentum4(e, xi * ratio, yi * ratio, zi * ratio)
 
 
+def find_closet_pairs(brem_cluster_e: List[float], brem_photon_e: List[float]) -> List[int]:
+    print(brem_photon_e)
+    print(brem_cluster_e)
+    print(len(brem_photon_e))
+    print(len(brem_cluster_e))
+
+    def closet_val_fn(iv: Tuple[int, float], indicies: List[float]):
+        i, val = iv
+        if i in indicies:
+            return math.inf
+        else:
+            return val
+
+    indicies = []
+    for cluster_e in brem_cluster_e:
+        while True:
+            copied_brem_p = list(
+                map(partial(closet_val_fn, indicies=indicies), enumerate(deepcopy(brem_photon_e)))
+            )
+            print(copied_brem_p)
+            idx = brem_photon_e.index(min(copied_brem_p, key=lambda x: abs(x - cluster_e)))
+            if not idx in indicies:
+                indicies.append(idx)
+                break
+    print(indicies)
+
+
 def estimate_brem_momentum_variance(filename: str):
     sub_data_tuple = namedtuple(
         "sub_data_tuple", ["x", "y", "z", "c_e", "ovx", "ovy", "ovz", "px", "py", "pz", "t_e"]
@@ -486,11 +517,12 @@ def estimate_brem_momentum_variance(filename: str):
     e = []
     with uproot.open(filename) as file:
         tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        i = 0
         for data in zip(
-            tree["BremCluster_X"].array(),
-            tree["BremCluster_Y"].array(),
-            tree["BremCluster_Z"].array(),
-            tree["BremCluster_E"].array(),
+            tree["CaloCluster_X"].array(),
+            tree["CaloCluster_Y"].array(),
+            tree["CaloCluster_Z"].array(),
+            tree["CaloCluster_E"].array(),
             tree["BremPhoton_OVX"].array(),
             tree["BremPhoton_OVY"].array(),
             tree["BremPhoton_OVZ"].array(),
@@ -499,6 +531,9 @@ def estimate_brem_momentum_variance(filename: str):
             tree["BremPhoton_PZ"].array(),
             tree["BremPhoton_E"].array(),
         ):
+            if i == 0:
+                find_closet_pairs(list(data[3]), list(data[-1]))
+                i += 1
             for brem in named_zip(sub_data_tuple, *data):
                 if brem.ovz > 5000:
                     continue
@@ -795,13 +830,13 @@ def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
         b_stdreco.append(d.b_stdreco.m)
         b_ourreco.append(d.b_ourreco(classifier=classifier).m)
     # pprint(b_ourreco)
-
+    print(mode(jpsi_ourreco))
     fig, axes = plt.subplots(nrows=2, ncols=1)
 
-    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 3400), bins=20)
-    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 3400), bins=20)
-    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 3400), bins=20)
-    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 3400), bins=20)
+    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20)
+    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20)
+    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20)
+    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20)
 
     axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20)
     axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20)

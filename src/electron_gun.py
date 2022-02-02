@@ -1,50 +1,28 @@
-from collections import defaultdict
-from re import purge, sub
-from typing import Dict, List
-import numpy
-import uproot
-from uproot import TTree, TBranch
-import matplotlib.pyplot as plt
 import itertools
-from pprint import pprint
 import math
+from collections import defaultdict, namedtuple
 from copy import deepcopy
-import pandas as pd
-import tensorflow.keras as keras
-from tqdm.contrib import tzip
-from tqdm import tqdm
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.metrics import roc_curve, RocCurveDisplay
-import numpy as np
-import skopt
-import pylorentz
+from pprint import pprint
+from re import purge, sub
+from typing import Dict, List, Tuple
 
-from plot_masses import JPsi_stdreco
+import matplotlib.pyplot as plt
+import numpy
+import numpy as np
+import pandas as pd
+import uproot
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics import RocCurveDisplay, roc_curve
+from tqdm import tqdm
+from tqdm.contrib import tzip
+from uproot import TBranch, TTree
+from utils import named_zip, Momentum4, chunked
 
 
 class InitialModel:
     def __init__(self, filename, max_data) -> None:
         self.filename = filename
         self.max_data = max_data
-
-    def machine_learning_model(self):
-        model = keras.models.Sequential(
-            [
-                keras.layers.Flatten(input_shape=(10,)),
-                keras.layers.Dense(128, activation="tanh"),
-                keras.layers.Dense(256, activation="relu"),
-                keras.layers.Dense(512, activation="sigmoid"),
-                keras.layers.Dense(2, activation="softmax"),
-            ]
-        )
-
-        model.compile(
-            optimizer=keras.optimizers.Adam(),
-            loss=keras.losses.BinaryCrossentropy(from_logits=True),
-            metrics=["accuracy"],
-        )
-
-        return model
 
     def prepare_data(self, df: pd.DataFrame, split_frac=0.9):
         label_list = df["label"].to_numpy()
@@ -177,22 +155,6 @@ class InitialModel:
     def train_model(
         self, training_data, train_labels, validation_data, validation_labels
     ) -> GradientBoostingClassifier:
-        search_space = skopt.space.Space(
-            [
-                skopt.space.Real(name="learning_rate", low=0.001, high=0.1),
-                skopt.space.Integer(name="n_estimators", low=10, high=1000),
-            ]
-        )
-
-        @skopt.utils.use_named_args(search_space.dimensions)
-        def fn_optimise(learning_rate, n_estimators):
-            gbc = GradientBoostingClassifier(learning_rate=learning_rate, n_estimators=n_estimators)
-            gbc.fit(training_data, train_labels)
-            train_acc = 100 * (sum(gbc.predict(training_data) == train_labels) / training_data.shape[0])
-            val_acc = 100 * (
-                sum(gbc.predict(validation_data) == validation_labels) / validation_data.shape[0]
-            )
-            return val_acc
 
         total_size = training_data.shape[0] + validation_data.shape[0]
         # res = skopt.gp_minimize(fn_optimise, dimensions=search_space)
@@ -326,12 +288,145 @@ class InitialModel:
         return data
 
 
-im = InitialModel("1x106.root", max_data=10000)
+def generate_electron_curve(filename: str) -> List[float]:
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        out = []
+        for e_cluster, e_photon, n_brem in zip(
+            tree["CaloCluster_E"].array(), tree["BremPhoton_E"].array(), tree["nBremPhotons"].array()
+        ):
+            e_cluster_sum = np.sum(e_cluster)
+            e_photon_sum = np.sum(e_photon)
+            if e_photon_sum != 0:
+                out.append(e_cluster_sum / e_photon_sum)
+        return out
 
-df = im.generate_data_mapping()
-mixed_data_groups = im.generate_data_mixing(df)
-training_data, training_labels, validation_data, validation_labels = im.prepare_data(mixed_data_groups)
 
-gbc = im.train_model(training_data, training_labels, validation_data, validation_labels)
-# im.plot_roc(gbc, training_data, training_labels, validation_data, validation_labels)
-im.calculate_energy_recon(gbc, training_data, training_labels, validation_data, validation_labels)
+def generate_electron_momentum_curve(
+    filename: str,
+) -> Tuple[List[float], List[float], List[float], List[float]]:
+    ovx, ovy, ovz = generate_ov_distribution(filename)
+    ovx = np.mean(ovx)
+    ovy = np.mean(ovy)
+    ovz = np.mean(ovz)
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        total_e = []
+        total_px = []
+        total_py = []
+        total_pz = []
+        data_tuple = namedtuple(
+            "data_tuple", ["c_e", "x", "y", "z", "px", "py", "pz", "p_e", "ntracks", "track_type"]
+        )
+        for data in named_zip(
+            data_tuple,
+            tree["CaloCluster_E"].array(),
+            tree["CaloCluster_X"].array(),
+            tree["CaloCluster_Y"].array(),
+            tree["CaloCluster_Z"].array(),
+            tree["BremPhoton_PX"].array(),
+            tree["BremPhoton_PY"].array(),
+            tree["BremPhoton_PZ"].array(),
+            tree["BremPhoton_E"].array(),
+            tree["nElectronTracks"].array(),
+            tree["ElectronTrack_TYPE"].array(),
+        ):
+            if data.ntracks < 1 or data.track_type[0] != 3:
+                continue
+            true_brem_momenta = Momentum4(0, 0, 0, 0)
+            reco_brem_momenta = Momentum4(0, 0, 0, 0)
+            for (e, px, py, pz) in zip(data.p_e, data.px, data.py, data.pz):
+                brem_momenta = Momentum4(e, px, py, pz)
+                true_brem_momenta += brem_momenta
+            for (e, x, y, z) in zip(data.c_e, data.x, data.y, data.z):
+                x -= ovx
+                y -= ovy
+                z -= ovz
+                mag = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+                if mag == 0:
+                    continue
+                ratio = (1 / mag) * e
+                brem_momenta = Momentum4(e, ratio * x, ratio * y, ratio * z)
+                reco_brem_momenta += brem_momenta
+            if true_brem_momenta.e != 0:
+                total_e.append(reco_brem_momenta.e / true_brem_momenta.e)
+            if true_brem_momenta.p_x != 0:
+                total_px.append(reco_brem_momenta.p_x / true_brem_momenta.p_x)
+            if true_brem_momenta.p_y != 0:
+                total_py.append(reco_brem_momenta.p_y / true_brem_momenta.p_y)
+            if true_brem_momenta.p_z != 0:
+                total_pz.append(reco_brem_momenta.p_z / true_brem_momenta.p_z)
+        return total_e, total_px, total_py, total_pz
+
+
+def generate_electron_momentum_delta(
+    filename: str,
+) -> List[Momentum4]:
+    ovx, ovy, ovz = generate_ov_distribution(filename)
+    ovx = np.mean(ovx)
+    ovy = np.mean(ovy)
+    ovz = np.mean(ovz)
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        delta_momenta = []
+        data_tuple = namedtuple("data_tuple", ["c_e", "x", "y", "z", "px", "py", "pz", "p_e"])
+        for data in named_zip(
+            data_tuple,
+            tree["CaloCluster_E"].array(),
+            tree["CaloCluster_X"].array(),
+            tree["CaloCluster_Y"].array(),
+            tree["CaloCluster_Z"].array(),
+            tree["BremPhoton_PX"].array(),
+            tree["BremPhoton_PY"].array(),
+            tree["BremPhoton_PZ"].array(),
+            tree["BremPhoton_E"].array(),
+        ):
+            true_brem_momenta = Momentum4(0, 0, 0, 0)
+            reco_brem_momenta = Momentum4(0, 0, 0, 0)
+            for (e, px, py, pz) in zip(data.p_e, data.px, data.py, data.pz):
+                brem_momenta = Momentum4(e, px, py, pz)
+                true_brem_momenta += brem_momenta
+            for (e, x, y, z) in zip(data.c_e, data.x, data.y, data.z):
+                x -= ovx
+                y -= ovy
+                z -= ovz
+                mag = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+                if mag == 0:
+                    continue
+                ratio = (1 / mag) * e
+                brem_momenta = Momentum4(e, ratio * x, ratio * y, ratio * z)
+                reco_brem_momenta += brem_momenta
+            if (
+                true_brem_momenta.e != 0
+                or true_brem_momenta.p_x != 0
+                or true_brem_momenta.p_y != 0
+                or true_brem_momenta.p_z != 0
+            ):
+                delta_momenta.append(true_brem_momenta - reco_brem_momenta)
+        return delta_momenta
+
+
+def generate_ov_distribution(filename: str):
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        OVX = []
+        OVY = []
+        OVZ = []
+        data_tuple = namedtuple("data_tuple", ["ovx", "ovy", "ovz"])
+        for data in named_zip(
+            data_tuple,
+            tree["BremPhoton_OVX"].array(),
+            tree["BremPhoton_OVY"].array(),
+            tree["BremPhoton_OVZ"].array(),
+        ):
+            for (ovx, ovy, ovz) in zip(data.ovx, data.ovy, data.ovz):
+                if ovz > 5000:
+                    continue
+                OVX.append(ovx)
+                OVY.append(ovy)
+                OVZ.append(ovz)
+    return OVX, OVY, OVZ
+
+
+if __name__ == "__main__":
+    print(generate_electron_curve("./1000ev.root"))
