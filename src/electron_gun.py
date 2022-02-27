@@ -320,10 +320,10 @@ def generate_electron_momentum_curve(
         )
         for data in named_zip(
             data_tuple,
-            tree["CaloCluster_E"].array(),
-            tree["CaloCluster_X"].array(),
-            tree["CaloCluster_Y"].array(),
-            tree["CaloCluster_Z"].array(),
+            tree["BremCluster_E"].array(),
+            tree["BremCluster_X"].array(),
+            tree["BremCluster_Y"].array(),
+            tree["BremCluster_Z"].array(),
             tree["BremPhoton_PX"].array(),
             tree["BremPhoton_PY"].array(),
             tree["BremPhoton_PZ"].array(),
@@ -338,6 +338,8 @@ def generate_electron_momentum_curve(
             for (e, px, py, pz) in zip(data.p_e, data.px, data.py, data.pz):
                 brem_momenta = Momentum4(e, px, py, pz)
                 true_brem_momenta += brem_momenta
+            if len(data.c_e) > 1:
+                continue
             for (e, x, y, z) in zip(data.c_e, data.x, data.y, data.z):
                 x -= ovx
                 y -= ovy

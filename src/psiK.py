@@ -289,10 +289,12 @@ class DataInterface:
 
 
 def get_names(filename: str):
+    from pprint import pprint
+
     with uproot.open(filename) as file:
         print(file.keys())
         tree: Dict[str, TBranch] = file["tuple/tuple;1"]
-        print(tree.keys())
+        pprint(tree.keys())
 
 
 def generate_brem_data(x, y, z, cluster_e, px, py, pz, e, ovz):
@@ -519,10 +521,10 @@ def estimate_brem_momentum_variance(filename: str):
         tree: Dict[str, TBranch] = file["tuple/tuple;1"]
         i = 0
         for data in zip(
-            tree["CaloCluster_X"].array(),
-            tree["CaloCluster_Y"].array(),
-            tree["CaloCluster_Z"].array(),
-            tree["CaloCluster_E"].array(),
+            tree["BremCluster_X"].array(),
+            tree["BremCluster_Y"].array(),
+            tree["BremCluster_Z"].array(),
+            tree["BremCluster_E"].array(),
             tree["BremPhoton_OVX"].array(),
             tree["BremPhoton_OVY"].array(),
             tree["BremPhoton_OVZ"].array(),
@@ -861,11 +863,63 @@ def eval_and_gen(filename: str, classifier: Optional[XGBClassifier] = None) -> O
         return classifier
 
 
+def get_uncertainty_graphs(filename: str):
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        i = 0
+        e_clusters = []
+        true_clusters = []
+        for (n_arr, e_arr, true_e_arr) in zip(
+            tree["BremPhoton_nClusters"].array(),
+            tree["BremCluster_E"].array(),
+            tree["BremPhoton_E"].array(),
+        ):
+            prev_n = 0
+            for n in n_arr:
+                e_clusters.append(np.sum(e_arr.to_list()[prev_n : prev_n + int(n)]))
+                prev_n += int(n)
+
+            true_clusters.extend(true_e_arr)
+
+        e_clusters = np.array(e_clusters)
+        true_clusters = np.array(true_clusters)
+        true_clusters = true_clusters[e_clusters != 0]
+        e_clusters = e_clusters[e_clusters != 0]
+        plt.plot(true_clusters, e_clusters / true_clusters, "rx")
+        plt.show()
+
+
+def plot_energy_disto(filename: str):
+    with uproot.open(filename) as file:
+        tree: Dict[str, TBranch] = file["tuple/tuple;1"]
+        e_clusters = []
+        true_clusters = []
+        calo_clusters = []
+        for (n_arr, e_arr, true_e_arr, cluster_e) in zip(
+            tree["BremPhoton_nClusters"].array(),
+            tree["BremCluster_E"].array(),
+            tree["BremPhoton_E"].array(),
+            tree["CaloCluster_E"].array(),
+        ):
+            prev_n = 0
+            for n in n_arr:
+                e_clusters.append(np.sum(e_arr.to_list()[prev_n : prev_n + int(n)]))
+                prev_n += int(n)
+
+            true_clusters.extend(true_e_arr)
+            calo_clusters.extend(cluster_e)
+        calo_clusters = np.array(calo_clusters)
+        print(np.shape(calo_clusters))
+        e_clusters = np.array(e_clusters)
+        true_clusters = np.array(true_clusters)
+        print(np.shape(true_clusters))
+        true_clusters = true_clusters[e_clusters != 0]
+        e_clusters = e_clusters[e_clusters != 0]
+        calo_clusters = calo_clusters[calo_clusters != 0]
+        print(calo_clusters.shape)
+        print(true_clusters.shape)
+        return e_clusters, true_clusters, calo_clusters
+
+
 if __name__ == "__main__":
-    get_names("psiK_1000.root")
-    out = generate_data_interface("psiK_1000.root")
-    data = generate_data_mixing(out)
-    training_data, training_labels, validation_data, validation_labels = generate_prepared_data(data)
-    xgb = train_xgboost(training_data, training_labels, validation_data, validation_labels)
-    plot_masses(xgb, out)
-    # estimate_brem_momentum_variance("psiK_1000.root")
+    get_uncertainty_graphs("1000ev.root")
