@@ -159,17 +159,22 @@ class DataInterface:
         brem_momenta: List[Momentum4],
         brem_positions: List[Position3],
         label: Optional[int] = None,
+        cutoff: float = None,
     ):
+        if cutoff is None:
+            cutoff = 0
         out = []
         for (brem_momentum, brem_pos) in zip(brem_momenta, brem_positions):
-            temp = {}
-            dp: Momentum4 = e_momentum - brem_momentum
-            dr: Position3 = e_pos - brem_pos
-            temp = {"p_dphi": dp.phi, "p_dtheta": dp.theta, "x_dtheta": dr.theta, "x_dphi": dr.phi}
-            if label is not None:
-                temp.update({"id": self._id, "label": label})
 
-            out.append(temp)
+            if brem_momentum.e > cutoff:
+                temp = {}
+                dp: Momentum4 = e_momentum - brem_momentum
+                dr: Position3 = e_pos - brem_pos
+                temp = {"p_dphi": dp.phi, "p_dtheta": dp.theta, "x_dtheta": dr.theta, "x_dphi": dr.phi}
+                if label is not None:
+                    temp.update({"id": self._id, "label": label})
+
+                out.append(temp)
 
         return pd.DataFrame.from_records(out)
 
@@ -257,35 +262,45 @@ class DataInterface:
     def b_truereco(self) -> Momentum4:
         return self.k_momentum + self.jpsi_momentum
 
-    def jpsi_ourreco(self, classifier: XGBClassifier) -> Momentum4:
+    def jpsi_ourreco(self, classifier: XGBClassifier, cutoff: Optional[float] = None) -> Momentum4:
         full_brem_pos = deepcopy(self.brem_minus_positions)
         full_brem_momentum = deepcopy(self.brem_minus_momenta)
         full_brem_pos.extend(self.brem_plus_positions)
         full_brem_momentum.extend(self.brem_plus_momenta)
         plus_df = self.generate_data_slice(
-            self.electron_plus_momentum, self.electron_plus_position, full_brem_momentum, full_brem_pos
+            self.electron_plus_momentum,
+            self.electron_plus_position,
+            full_brem_momentum,
+            full_brem_pos,
+            cutoff=cutoff,
         )
 
         minus_df = self.generate_data_slice(
-            self.electron_minus_momentum, self.electron_minus_position, full_brem_momentum, full_brem_pos
+            self.electron_minus_momentum,
+            self.electron_minus_position,
+            full_brem_momentum,
+            full_brem_pos,
+            cutoff=cutoff,
         )
+        e_plus_reco = copy(self.electron_plus_momentum)
+        e_minus_reco = self.electron_minus_momentum
         plus_arr = plus_df.to_numpy()
         minus_arr = minus_df.to_numpy()
-        plus_predictions: List[bool] = classifier.predict(plus_arr) == 1
-        minus_predictions: List[bool] = classifier.predict(minus_arr) == 1
-        plus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, plus_predictions))
-        minus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, minus_predictions))
-        e_plus_reco = copy(self.electron_plus_momentum)
-        for brem_momentum in plus_brem_momentum:
-            e_plus_reco += brem_momentum
-        e_minus_reco = self.electron_minus_momentum
-        for brem_momentum in copy(minus_brem_momentum):
-            e_minus_reco += brem_momentum
+        if len(plus_arr) > 0:
+            plus_predictions: List[bool] = classifier.predict(plus_arr) == 1
+            plus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, plus_predictions))
+            for brem_momentum in plus_brem_momentum:
+                e_plus_reco += brem_momentum
 
+        if len(minus_arr) > 0:
+            minus_predictions: List[bool] = classifier.predict(minus_arr) == 1
+            minus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, minus_predictions))
+            for brem_momentum in copy(minus_brem_momentum):
+                e_minus_reco += brem_momentum
         return e_plus_reco + e_minus_reco
 
-    def b_ourreco(self, classifier: XGBClassifier) -> Momentum4:
-        return self.jpsi_ourreco(classifier=classifier) + self.k_momentum
+    def b_ourreco(self, classifier: XGBClassifier, cutoff: Optional[float] = None) -> Momentum4:
+        return self.jpsi_ourreco(classifier=classifier, cutoff=cutoff) + self.k_momentum
 
 
 def get_names(filename: str):
@@ -811,7 +826,7 @@ def generate_hist_features(data: np.ndarray, range: Tuple[float, float]):
     return bin_widths, bin_centers
 
 
-def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
+def plot_masses(classifier: XGBClassifier, data: List[DataInterface], cutoff: Optional[float] = None):
     jpsi_noreco = []
     jpsi_truereco = []
     jpsi_stdreco = []
@@ -825,25 +840,25 @@ def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
         jpsi_noreco.append(d.jpsi_noreco.m)
         jpsi_truereco.append(d.jpsi_truereco.m)
         jpsi_stdreco.append(d.jpsi_stdreco.m)
-        jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier).m)
+        jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier, cutoff=cutoff).m)
 
         b_noreco.append(d.b_noreco.m)
         b_truereco.append(d.b_truereco_from_electron.m)
         b_stdreco.append(d.b_stdreco.m)
-        b_ourreco.append(d.b_ourreco(classifier=classifier).m)
+        b_ourreco.append(d.b_ourreco(classifier=classifier, cutoff=cutoff).m)
     # pprint(b_ourreco)
     print(mode(jpsi_ourreco))
     fig, axes = plt.subplots(nrows=2, ncols=1)
 
-    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20)
+    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20, density=True)
 
-    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20)
+    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20, density=True)
 
     axes[0].legend()
     axes[1].legend()
@@ -922,4 +937,8 @@ def plot_energy_disto(filename: str):
 
 
 if __name__ == "__main__":
-    get_uncertainty_graphs("1000ev.root")
+    data_interfaces = generate_data_interface("psiK_1000.root")
+    data = generate_data_mixing(data_interfaces)
+    training_data, training_labels, validation_data, validation_labels = generate_prepared_data(data)
+    classifier = train_xgboost(training_data, training_labels, validation_data, validation_labels)
+    plot_masses(classifier, data_interfaces, 2000)
