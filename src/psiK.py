@@ -25,6 +25,16 @@ from collections import namedtuple
 from utils import Position3, chunked, Momentum4, named_zip, data
 from scipy.optimize import minimize, basinhopping
 
+import plotly.graph_objects as go
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import (
+    roc_auc_score,
+    roc_curve,
+    precision_recall_curve,
+    average_precision_score,
+)
+from sklearn.model_selection import RepeatedStratifiedKFold
+
 
 @dataclass(eq=False)
 class DataInterface:
@@ -64,7 +74,9 @@ class DataInterface:
         electron_plus_y = data["e_plus_y"]
         electron_plus_z = data["e_plus_z"]
 
-        self.electron_plus_position = Position3(electron_plus_x, electron_plus_y, electron_plus_z)
+        self.electron_plus_position = Position3(
+            electron_plus_x, electron_plus_y, electron_plus_z
+        )
 
         electron_minus_px = data["e_minus_px"]
         electron_minus_py = data["e_minus_py"]
@@ -78,7 +90,9 @@ class DataInterface:
         electron_minus_y = data["e_minus_y"]
         electron_minus_z = data["e_minus_z"]
 
-        self.electron_minus_position = Position3(electron_minus_x, electron_minus_y, electron_minus_z)
+        self.electron_minus_position = Position3(
+            electron_minus_x, electron_minus_y, electron_minus_z
+        )
 
         jpsi_px = data["jpsi_px"]
         jpsi_py = data["jpsi_py"]
@@ -106,7 +120,9 @@ class DataInterface:
         std_e_plus_pz = data["std_electron_plus_pz"]
         std_e_plus_e = data["std_electron_plus_e"]
 
-        self.std_electron_plus_momentum = Momentum4(std_e_plus_e, std_e_plus_px, std_e_plus_py, std_e_plus_pz)
+        self.std_electron_plus_momentum = Momentum4(
+            std_e_plus_e, std_e_plus_px, std_e_plus_py, std_e_plus_pz
+        )
 
         std_e_minus_px = data["std_electron_minus_px"]
         std_e_minus_py = data["std_electron_minus_py"]
@@ -128,7 +144,9 @@ class DataInterface:
             brem_px = brem_data["px"]
             brem_pz = brem_data["pz"]
             brem_e = brem_data["e"]
-            brem_plus_momenta.append(reconstruct_brem(brem_x, brem_y, brem_z, brem_data["cluster_e"]))
+            brem_plus_momenta.append(
+                reconstruct_brem(brem_x, brem_y, brem_z, brem_data["cluster_e"])
+            )
             brem_plus_positions.append(Position3(brem_x, brem_y, brem_z))
             true_brem_plus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
         self.brem_plus_momenta = brem_plus_momenta
@@ -145,7 +163,9 @@ class DataInterface:
             brem_px = brem_data["px"]
             brem_pz = brem_data["pz"]
             brem_e = brem_data["e"]
-            brem_minus_momenta.append(reconstruct_brem(brem_x, brem_y, brem_z, brem_data["cluster_e"]))
+            brem_minus_momenta.append(
+                reconstruct_brem(brem_x, brem_y, brem_z, brem_data["cluster_e"])
+            )
             brem_minus_positions.append(Position3(brem_x, brem_y, brem_z))
             true_brem_minus_momenta.append(Momentum4(brem_e, brem_px, brem_py, brem_pz))
         self.brem_minus_momenta = brem_minus_momenta
@@ -165,7 +185,12 @@ class DataInterface:
             temp = {}
             dp: Momentum4 = e_momentum - brem_momentum
             dr: Position3 = e_pos - brem_pos
-            temp = {"p_dphi": dp.phi, "p_dtheta": dp.theta, "x_dtheta": dr.theta, "x_dphi": dr.phi}
+            temp = {
+                "p_dphi": dp.phi,
+                "p_dtheta": dp.theta,
+                "x_dtheta": dr.theta,
+                "x_dphi": dr.phi,
+            }
             if label is not None:
                 temp.update({"id": self._id, "label": label})
 
@@ -214,7 +239,9 @@ class DataInterface:
         )
 
     def full_data_slice(self, label=None) -> pd.DataFrame:
-        return pd.concat([self.e_plus_data_slice(label), self.e_minus_data_slice(label)])
+        return pd.concat(
+            [self.e_plus_data_slice(label), self.e_minus_data_slice(label)]
+        )
 
     def full_brem_data(self) -> Tuple[List[Momentum4], List[Position3], int]:
         brem_momentum = deepcopy(self.brem_minus_momenta)
@@ -263,18 +290,28 @@ class DataInterface:
         full_brem_pos.extend(self.brem_plus_positions)
         full_brem_momentum.extend(self.brem_plus_momenta)
         plus_df = self.generate_data_slice(
-            self.electron_plus_momentum, self.electron_plus_position, full_brem_momentum, full_brem_pos
+            self.electron_plus_momentum,
+            self.electron_plus_position,
+            full_brem_momentum,
+            full_brem_pos,
         )
 
         minus_df = self.generate_data_slice(
-            self.electron_minus_momentum, self.electron_minus_position, full_brem_momentum, full_brem_pos
+            self.electron_minus_momentum,
+            self.electron_minus_position,
+            full_brem_momentum,
+            full_brem_pos,
         )
         plus_arr = plus_df.to_numpy()
         minus_arr = minus_df.to_numpy()
         plus_predictions: List[bool] = classifier.predict(plus_arr) == 1
         minus_predictions: List[bool] = classifier.predict(minus_arr) == 1
-        plus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, plus_predictions))
-        minus_brem_momentum: List[Momentum4] = list(compress(full_brem_momentum, minus_predictions))
+        plus_brem_momentum: List[Momentum4] = list(
+            compress(full_brem_momentum, plus_predictions)
+        )
+        minus_brem_momentum: List[Momentum4] = list(
+            compress(full_brem_momentum, minus_predictions)
+        )
         e_plus_reco = copy(self.electron_plus_momentum)
         for brem_momentum in plus_brem_momentum:
             e_plus_reco += brem_momentum
@@ -482,7 +519,9 @@ def reconstruct_brem(x: float, y: float, z: float, e: float, ov=None):
     return Momentum4(e, xi * ratio, yi * ratio, zi * ratio)
 
 
-def find_closet_pairs(brem_cluster_e: List[float], brem_photon_e: List[float]) -> List[int]:
+def find_closet_pairs(
+    brem_cluster_e: List[float], brem_photon_e: List[float]
+) -> List[int]:
     print(brem_photon_e)
     print(brem_cluster_e)
     print(len(brem_photon_e))
@@ -499,10 +538,15 @@ def find_closet_pairs(brem_cluster_e: List[float], brem_photon_e: List[float]) -
     for cluster_e in brem_cluster_e:
         while True:
             copied_brem_p = list(
-                map(partial(closet_val_fn, indicies=indicies), enumerate(deepcopy(brem_photon_e)))
+                map(
+                    partial(closet_val_fn, indicies=indicies),
+                    enumerate(deepcopy(brem_photon_e)),
+                )
             )
             print(copied_brem_p)
-            idx = brem_photon_e.index(min(copied_brem_p, key=lambda x: abs(x - cluster_e)))
+            idx = brem_photon_e.index(
+                min(copied_brem_p, key=lambda x: abs(x - cluster_e))
+            )
             if not idx in indicies:
                 indicies.append(idx)
                 break
@@ -511,7 +555,8 @@ def find_closet_pairs(brem_cluster_e: List[float], brem_photon_e: List[float]) -
 
 def estimate_brem_momentum_variance(filename: str):
     sub_data_tuple = namedtuple(
-        "sub_data_tuple", ["x", "y", "z", "c_e", "ovx", "ovy", "ovz", "px", "py", "pz", "t_e"]
+        "sub_data_tuple",
+        ["x", "y", "z", "c_e", "ovx", "ovy", "ovz", "px", "py", "pz", "t_e"],
     )
     true: List[Momentum4] = []
     reco_ov: List[Momentum4] = []
@@ -542,7 +587,13 @@ def estimate_brem_momentum_variance(filename: str):
                 e.append(brem.c_e)
                 reco.append(reconstruct_brem(brem.x, brem.y, brem.z, brem.c_e))
                 reco_ov.append(
-                    reconstruct_brem(brem.x, brem.y, brem.z, brem.c_e, ov=[brem.ovx, brem.ovy, brem.ovz])
+                    reconstruct_brem(
+                        brem.x,
+                        brem.y,
+                        brem.z,
+                        brem.c_e,
+                        ov=[brem.ovx, brem.ovy, brem.ovz],
+                    )
                 )
                 true.append(Momentum4(brem.t_e, brem.px, brem.py, brem.pz))
     print(np.mean([t.p_x for t in true]))
@@ -569,7 +620,9 @@ def estimate_brem_momentum_variance(filename: str):
     print(np.mean([np.abs(t.e - r.e) for t, r in zip(true, reco_ov)]))
 
 
-def generate_data_mixing(data: List[DataInterface], sampling_frac: int = 2) -> pd.DataFrame:
+def generate_data_mixing(
+    data: List[DataInterface], sampling_frac: int = 2
+) -> pd.DataFrame:
     base_df = pd.concat([d.full_data_slice(label=1) for d in data])
     full = []
     brem_pos: List[Position3] = []
@@ -583,10 +636,16 @@ def generate_data_mixing(data: List[DataInterface], sampling_frac: int = 2) -> p
         brem_id.extend([i] * len(momentum))
     i = 0
     for _id, group in base_df.groupby("id"):
-        length = sum(map(lambda x: 1, filter(lambda _internal_id: _internal_id == _id, brem_id)))
+        length = sum(
+            map(lambda x: 1, filter(lambda _internal_id: _internal_id == _id, brem_id))
+        )
         false_mask = list(map(lambda _internal_id: _internal_id != _id, brem_id))
-        sample_pos = sample(list(compress(brem_pos, false_mask)), k=int(sampling_frac * length / 2))
-        sample_momentum = sample(list(compress(brem_momentum, false_mask)), k=int(sampling_frac * length / 2))
+        sample_pos = sample(
+            list(compress(brem_pos, false_mask)), k=int(sampling_frac * length / 2)
+        )
+        sample_momentum = sample(
+            list(compress(brem_momentum, false_mask)), k=int(sampling_frac * length / 2)
+        )
         d = data[i]
         mixed_data = d.generate_external_data_slice(sample_momentum, sample_pos)
         full.extend([deepcopy(group), mixed_data])
@@ -601,8 +660,14 @@ def generate_prepared_data(data: pd.DataFrame, split_frac: int = 0.9):
     indices = np.random.permutation(new_data.shape[0])
     i = int(split_frac * new_data.shape[0])
     training_idx, validation_idx = indices[:i], indices[i:]
-    training_data, validation_data = new_data[training_idx, :], new_data[validation_idx, :]
-    training_labels, validation_labels = label_list[training_idx], label_list[validation_idx]
+    training_data, validation_data = (
+        new_data[training_idx, :],
+        new_data[validation_idx, :],
+    )
+    training_labels, validation_labels = (
+        label_list[training_idx],
+        label_list[validation_idx],
+    )
     return training_data, training_labels, validation_data, validation_labels
 
 
@@ -618,7 +683,9 @@ def train_classifier(
 
     res = Var()
 
-    gbc = GradientBoostingClassifier(learning_rate=res.learning_rate[0], n_estimators=res.n_estimators[0])
+    gbc = GradientBoostingClassifier(
+        learning_rate=res.learning_rate[0], n_estimators=res.n_estimators[0]
+    )
     gbc.fit(training_data, train_labels)
     return gbc
 
@@ -631,8 +698,13 @@ def train_xgboost(
 ):
     xgb = XGBClassifier()
     xgb.fit(training_data, training_labels)
-    train_acc = 100 * (sum(xgb.predict(training_data) == training_labels) / training_data.shape[0])
-    val_acc = 100 * (sum(xgb.predict(validation_data) == validation_labels) / validation_data.shape[0])
+    train_acc = 100 * (
+        sum(xgb.predict(training_data) == training_labels) / training_data.shape[0]
+    )
+    val_acc = 100 * (
+        sum(xgb.predict(validation_data) == validation_labels)
+        / validation_data.shape[0]
+    )
     print(train_acc)
     print(val_acc)
     return xgb
@@ -645,23 +717,50 @@ def plot_xgboost_histo(
     validation_data: np.ndarray,
     validation_labels: np.ndarray,
 ):
-    train_acc = 100 * (sum(xgb.predict(training_data) == training_labels) / training_data.shape[0])
-    val_acc = 100 * (sum(xgb.predict(validation_data) == validation_labels) / validation_data.shape[0])
+    train_acc = 100 * (
+        sum(xgb.predict(training_data) == training_labels) / training_data.shape[0]
+    )
+    val_acc = 100 * (
+        sum(xgb.predict(validation_data) == validation_labels)
+        / validation_data.shape[0]
+    )
     print(train_acc)
     print(val_acc)
 
-    classifier_training_s = xgb.predict(training_data[training_labels == 1], output_margin=True)
-    classifier_training_b = xgb.predict(training_data[training_labels == 0], output_margin=True)
-    classifier_testing_s = xgb.predict(validation_data[validation_labels == 1], output_margin=True)
-    classifier_testing_b = xgb.predict(validation_data[validation_labels == 0], output_margin=True)
+    classifier_training_s = xgb.predict(
+        training_data[training_labels == 1], output_margin=True
+    )
+    classifier_training_b = xgb.predict(
+        training_data[training_labels == 0], output_margin=True
+    )
+    classifier_testing_s = xgb.predict(
+        validation_data[validation_labels == 1], output_margin=True
+    )
+    classifier_testing_b = xgb.predict(
+        validation_data[validation_labels == 0], output_margin=True
+    )
 
-    c_min = -10
+    # classifier_training_s = xgb.predict_proba(training_data[training_labels==1])[:,1]
+    # classifier_training_b = xgb.predict_proba(training_data[training_labels==0])[:,0]
+    # #classifier_testing_s = xgb.predict_proba(validation_data)[:,1]
+    # #classifier_testing_b = xgb.predict_proba(validation_data)[:,0]
+    # print(xgb.predict_proba(training_data)[:5],training_labels[:10])
+
+    c_min = -15
     c_max = 10
 
-    histo_training_s = np.histogram(classifier_training_s, bins=40, range=(c_min, c_max), density=True)
-    histo_training_b = np.histogram(classifier_training_b, bins=40, range=(c_min, c_max), density=True)
-    histo_testing_s = np.histogram(classifier_testing_s, bins=40, range=(c_min, c_max), density=True)
-    histo_testing_b = np.histogram(classifier_testing_b, bins=40, range=(c_min, c_max), density=True)
+    histo_training_s = np.histogram(
+        classifier_training_s, bins=80, range=(c_min, c_max), density=True
+    )
+    histo_training_b = np.histogram(
+        classifier_training_b, bins=80, range=(c_min, c_max), density=True
+    )
+    histo_testing_s = np.histogram(
+        classifier_testing_s, bins=80, range=(c_min, c_max), density=True
+    )
+    histo_testing_b = np.histogram(
+        classifier_testing_b, bins=80, range=(c_min, c_max), density=True
+    )
 
     all_histos: List[np.histogram] = [
         histo_training_s,
@@ -674,6 +773,9 @@ def plot_xgboost_histo(
     bin_edges = histo_training_s[1]
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     bin_widths = bin_edges[1:] - bin_edges[:-1]
+
+    # Figure size
+    plt.figure(figsize=(16, 16))
     ax1 = plt.subplot(111)
 
     # Draw solid histograms for the training data
@@ -706,48 +808,82 @@ def plot_xgboost_histo(
     ax1.axis([c_min, c_max, h_min, h_max])
 
     # Make labels and title
-    plt.title("Classification with scikit-learn")
-    plt.xlabel("Classifier, GBC")
-    plt.ylabel("Counts/Bin")
+    # plt.title("Classification with scikit-learn", fontsize = 18)
+    plt.xlabel("Classifier, GBC", fontsize=20)
+    plt.ylabel("Counts/Bin", fontsize=20)
+    plt.xticks(size=18)
+    plt.yticks(size=18)
     # Make legend with small font
     legend = ax1.legend(loc="upper center", shadow=True, ncol=2)
     for alabel in legend.get_texts():
-        alabel.set_fontsize("small")
+        alabel.set_fontsize(22)
 
+    plt.grid(alpha=0.5)
     plt.show()
 
 
 def plot_roc(
-    gbc: GradientBoostingClassifier, training_data, train_labels, validation_data, validation_labels
+    gbc: GradientBoostingClassifier,
+    training_data,
+    train_labels,
+    validation_data,
+    validation_labels,
 ):
     # fpr, tpr, thresholds = roc_curve(train_labels, gbc.decision_function(training_data))
     # roc_display = RocCurveDisplay(fpr=fpr, tpr=tpr).plot()
     fig, (ax1, ax2) = plt.subplots(1, 2)
     roc_display_train = RocCurveDisplay.from_estimator(gbc, training_data, train_labels)
-    roc_display_val = RocCurveDisplay.from_estimator(gbc, validation_data, validation_labels)
+    roc_display_val = RocCurveDisplay.from_estimator(
+        gbc, validation_data, validation_labels
+    )
     roc_display_train.plot(ax=ax1, label="Train ")
     roc_display_val.plot(ax=ax2, label="Val")
     plt.show()
 
 
 def plot_histo(
-    gbc: GradientBoostingClassifier, training_data, train_labels, validation_data, validation_labels
+    gbc: GradientBoostingClassifier,
+    training_data,
+    train_labels,
+    validation_data,
+    validation_labels,
 ):
-    train_acc = 100 * (sum(gbc.predict(training_data) == train_labels) / training_data.shape[0])
-    val_acc = 100 * (sum(gbc.predict(validation_data) == validation_labels) / validation_data.shape[0])
-    classifier_training_s = gbc.decision_function(training_data[train_labels == 1]).ravel()
-    classifier_training_b = gbc.decision_function(training_data[train_labels == 0]).ravel()
-    classifier_testing_s = gbc.decision_function(validation_data[validation_labels == 1]).ravel()
-    classifier_testing_b = gbc.decision_function(validation_data[validation_labels == 0]).ravel()
+    train_acc = 100 * (
+        sum(gbc.predict(training_data) == train_labels) / training_data.shape[0]
+    )
+    val_acc = 100 * (
+        sum(gbc.predict(validation_data) == validation_labels)
+        / validation_data.shape[0]
+    )
+    classifier_training_s = gbc.decision_function(
+        training_data[train_labels == 1]
+    ).ravel()
+    classifier_training_b = gbc.decision_function(
+        training_data[train_labels == 0]
+    ).ravel()
+    classifier_testing_s = gbc.decision_function(
+        validation_data[validation_labels == 1]
+    ).ravel()
+    classifier_testing_b = gbc.decision_function(
+        validation_data[validation_labels == 0]
+    ).ravel()
     print(train_acc)
     print(val_acc)
     c_min = -10
     c_max = 10
 
-    histo_training_s = np.histogram(classifier_training_s, bins=40, range=(c_min, c_max), density=True)
-    histo_training_b = np.histogram(classifier_training_b, bins=40, range=(c_min, c_max), density=True)
-    histo_testing_s = np.histogram(classifier_testing_s, bins=40, range=(c_min, c_max), density=True)
-    histo_testing_b = np.histogram(classifier_testing_b, bins=40, range=(c_min, c_max), density=True)
+    histo_training_s = np.histogram(
+        classifier_training_s, bins=40, range=(c_min, c_max), density=True
+    )
+    histo_training_b = np.histogram(
+        classifier_training_b, bins=40, range=(c_min, c_max), density=True
+    )
+    histo_testing_s = np.histogram(
+        classifier_testing_s, bins=40, range=(c_min, c_max), density=True
+    )
+    histo_testing_b = np.histogram(
+        classifier_testing_b, bins=40, range=(c_min, c_max), density=True
+    )
 
     all_histos: List[np.histogram] = [
         histo_training_s,
@@ -835,15 +971,31 @@ def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
     print(mode(jpsi_ourreco))
     fig, axes = plt.subplots(nrows=2, ncols=1)
 
-    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20)
+    axes[0].hist(
+        jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20
+    )
+    axes[0].hist(
+        jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20
+    )
+    axes[0].hist(
+        jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20
+    )
+    axes[0].hist(
+        jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20
+    )
 
-    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20)
+    axes[1].hist(
+        b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20
+    )
+    axes[1].hist(
+        b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20
+    )
+    axes[1].hist(
+        b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20
+    )
+    axes[1].hist(
+        b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20
+    )
 
     axes[0].legend()
     axes[1].legend()
@@ -852,14 +1004,23 @@ def plot_masses(classifier: XGBClassifier, data: List[DataInterface]):
     plt.show()
 
 
-def eval_and_gen(filename: str, classifier: Optional[XGBClassifier] = None) -> Optional[XGBClassifier]:
+def eval_and_gen(
+    filename: str, classifier: Optional[XGBClassifier] = None
+) -> Optional[XGBClassifier]:
     data_interfaces = generate_data_interface(filename)
     data = generate_data_mixing(data_interfaces)
-    training_data, training_labels, validation_data, validation_labels = generate_prepared_data(data)
+    (
+        training_data,
+        training_labels,
+        validation_data,
+        validation_labels,
+    ) = generate_prepared_data(data)
     if classifier is not None:
         plot_masses(classifier, data_interfaces)
     else:
-        classifier = train_xgboost(training_data, training_labels, validation_data, validation_labels)
+        classifier = train_xgboost(
+            training_data, training_labels, validation_data, validation_labels
+        )
         return classifier
 
 
@@ -885,6 +1046,7 @@ def get_uncertainty_graphs(filename: str):
         true_clusters = np.array(true_clusters)
         true_clusters = true_clusters[e_clusters != 0]
         e_clusters = e_clusters[e_clusters != 0]
+        plt.hist()
         plt.plot(true_clusters, e_clusters / true_clusters, "rx")
         plt.show()
 
@@ -923,3 +1085,4 @@ def plot_energy_disto(filename: str):
 
 if __name__ == "__main__":
     get_uncertainty_graphs("1000ev.root")
+

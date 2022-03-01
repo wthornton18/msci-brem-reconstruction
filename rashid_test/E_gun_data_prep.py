@@ -41,8 +41,11 @@ class DataPrep:
     def extract_data(self):
         with uproot.open(self.filename) as file:
             tree = file['tuple/tuple']
-            Cluster_info = tree.arrays(self.features[6:], library = 'pd')
-            ElectronTrack = tree.arrays(self.features[:6], library = 'pd')
+            CI_names = deepcopy(self.features[6:])
+            CI_names.append('EventNumber')
+            ET_names = deepcopy(self.features[:6])
+            Cluster_info = tree.arrays(CI_names, library = 'pd')
+            ElectronTrack = tree.arrays(ET_names, library = 'pd')
             nElectronTracks = tree['nElectronTracks'].array()
             nCaloClusters = tree['nCaloClusters'].array()
             ElectronTrack_TYPE = tree['ElectronTrack_TYPE'].array()
@@ -75,18 +78,21 @@ class DataPrep:
             #print(events_after_mask2.shape)
 
             # Extract the info from tree with correct indices
-            ET = ElectronTrack.loc[events_after_mask2, self.features[:6]]
-            CI = Cluster_info.loc[events_after_mask2, self.features[6:]]   
+            
+            ET = ElectronTrack.loc[events_after_mask2, ET_names]
+            CI = Cluster_info.loc[events_after_mask2, CI_names]   
             
             # Remove nan's and inf's
+            
             ET = ET[~ET.isin([np.nan, np.inf, -np.inf]).any(1)]
             CI = CI[~CI.isin([np.nan, np.inf, -np.inf]).any(1)]
-
+            
             #Select only subentries with val 0 in pandas correspondong to TrackType 3 [because of first for loop]
             idx = pd.IndexSlice
             ET = ET.loc[idx[:,0],:]
-
+            
             # Merging even and odd rows seperatly
+            
             merge_BC_ET = pd.concat([ET, CI], axis=1).fillna(method='ffill')
 
             merge_BC_ET['label'] = 1
@@ -125,8 +131,17 @@ class DataPrep:
         x_train, x_temp, y_train, y_temp = train_test_split(X_data, y_data, stratify = y_data, test_size=1 - train_ratio, random_state=seed)
 
         x_val, x_test, y_val, y_test = train_test_split(x_temp, y_temp, test_size=test_ratio/(test_ratio + validation_ratio), shuffle = False) 
+        
+        EN_train = x_train['EventNumber']
+        x_train = x_train.drop(['EventNumber'], axis=1)
 
-        return (x_train,y_train), (x_val,y_val), (x_test,y_test)
+        EN_val = x_val['EventNumber']
+        x_val = x_val.drop(['EventNumber'], axis=1)
+
+        EN_test = x_test['EventNumber']
+        x_test = x_test.drop(['EventNumber'], axis=1)
+
+        return (x_train,y_train, EN_train), (x_val,y_val, EN_val), (x_test,y_test, EN_test)
 
 if __name__ == '__main__':
     features = ['ElectronTrack_PX','ElectronTrack_PY','ElectronTrack_PZ','ElectronTrack_X','ElectronTrack_Y','ElectronTrack_Z', 
@@ -141,7 +156,7 @@ if __name__ == '__main__':
     df = DP.extract_data()
     mixed_data_groups = DP.generate_data_mixing(df,ratio_of_signal_to_background=1)
     # training_data, training_labels, validation_data, validation_labels = DP.prepare_data(mixed_data_groups)
-    (x_train,y_train), (x_val,y_val), (x_test,y_test) = DP.train_validate_test_split(mixed_data_groups,seed = 42)
+    (x_train,y_train, EN_train), (x_val,y_val, EN_val), (x_test,y_test, EN_test) = DP.train_validate_test_split(mixed_data_groups,seed = 42)
 
     # # defining the space
     # space = [
