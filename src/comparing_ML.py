@@ -52,9 +52,10 @@ class MLP_model:
         Adam = tf.keras.optimizers.Adam(learning_rate=0.001)
         loss_fn = tf.keras.losses.SparseCategoricalCrossentropy()
         self.model.compile(optimizer=Adam, loss=loss_fn, metrics=["accuracy"])
+        return self.model
 
     def train(self, x_train, y_train, x_test, y_test, verbose=2):
-        self.model_()
+        self_model = self.model_()
         history = self.model.fit(
             x_train,
             y_train,
@@ -73,6 +74,202 @@ class MLP_model:
     def predict_proba(self, x_data):
         output = self.model.predict(x_data)
         return output
+
+    def roc_curve_error(self, X_train, y_train, X_test, y_test, ratio=1):
+        n_repeats = 10
+        cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=n_repeats, random_state=42)
+        folds = [(train, val_temp) for train, val_temp in cv.split(X_train, y_train)]
+
+        metrics = ["auc", "fpr", "tpr", "thresholds"]
+        results = {
+            "train": {m: [] for m in metrics},
+            "val": {m: [] for m in metrics},
+            "test": {m: [] for m in metrics},
+        }
+
+        dtest = (X_test, y_test)
+        for train, test in tqdm(folds, total=len(folds)):
+            dtrain = (X_train[train, :], y_train[train])
+            dval = (X_train[test, :], y_train[test])
+
+            model = self.model_().fit(dtrain[0], dtrain[1], verbose=0)
+            sets = [dtrain, dval, dtest]
+            for i, ds in enumerate(results.keys()):
+                y_preds = model.predict_proba(sets[i][0])[:, 1]
+                labels = sets[i][1]
+                fpr, tpr, thresholds = roc_curve(labels, y_preds)
+                results[ds]["fpr"].append(fpr)
+                results[ds]["tpr"].append(tpr)
+                results[ds]["thresholds"].append(thresholds)
+                results[ds]["auc"].append(roc_auc_score(labels, y_preds))
+
+        c_fill_train = "rgba(128, 252, 128, 0.2)"
+        c_line_train = "rgba(128, 152, 128, 0.5)"
+        c_line_main_train = "rgba(128, 0, 128, 1.0)"
+
+        c_fill_val = "rgba(52, 152, 0, 0.2)"
+        c_line_val = "rgba(52, 152, 0, 0.5)"
+        c_line_main_val = "rgba(41, 128, 0, 1.0)"
+
+        c_fill_test = "rgba(0, 152, 219, 0.2)"
+        c_line_test = "rgba(0, 152, 219, 0.5)"
+        c_line_main_test = "rgba(0, 128, 185, 1.0)"
+
+        c_grid = "rgba(189, 195, 199, 0.5)"
+        c_annot = "rgba(149, 165, 166, 0.5)"
+        c_highlight = "rgba(192, 57, 43, 1.0)"
+        fpr_mean = np.linspace(0, 1, 100)
+
+        def tp_rates(kind, results):
+            interp_tprs = []
+            for i in range(n_repeats):
+                fpr = results[kind]["fpr"][i]
+                tpr = results[kind]["tpr"][i]
+                interp_tpr = np.interp(fpr_mean, fpr, tpr)
+                interp_tpr[0] = 0.0
+                interp_tprs.append(interp_tpr)
+            tpr_mean = np.mean(interp_tprs, axis=0)
+            tpr_mean[-1] = 1.0
+            tpr_std = 2 * np.std(interp_tprs, axis=0)
+            tpr_upper = np.clip(tpr_mean + tpr_std, 0, 1)
+            tpr_lower = tpr_mean - tpr_std
+            auc = np.mean(results[kind]["auc"])
+            return tpr_upper, tpr_mean, tpr_lower, auc
+
+        kind = "val"
+        try:
+            title = "ROC Curve with signal to background ratio of: {:.2f}".format(ratio)
+        except:
+            title = "ROC Curve"
+        train_tpr_upper, train_tpr_mean, train_tpr_lower, train_auc = tp_rates(
+            "train", results
+        )
+        val_tpr_upper, val_tpr_mean, val_tpr_lower, val_auc = tp_rates("val", results)
+        test_tpr_upper, test_tpr_mean, test_tpr_lower, test_auc = tp_rates(
+            "test", results
+        )
+        fig = go.Figure(
+            [
+                go.Scatter(
+                    x=fpr_mean,
+                    y=train_tpr_upper,
+                    line=dict(color=c_line_train, width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="upper",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=train_tpr_lower,
+                    fill="tonexty",
+                    fillcolor=c_fill_train,
+                    line=dict(color=c_line_train, width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="lower",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=train_tpr_mean,
+                    line=dict(color=c_line_main_train, width=2),
+                    hoverinfo="skip",
+                    showlegend=True,
+                    name=f"Train_AUC: {train_auc:.3f}",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=val_tpr_upper,
+                    line=dict(color=c_line_val, width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="upper",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=val_tpr_lower,
+                    fill="tonexty",
+                    fillcolor=c_fill_val,
+                    line=dict(color=c_line_val, width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="lower",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=val_tpr_mean,
+                    line=dict(color=c_line_main_val, width=2),
+                    hoverinfo="skip",
+                    showlegend=True,
+                    name=f"Val_AUC: {val_auc:.3f}",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=test_tpr_upper,
+                    line=dict(color=c_line_test, width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="upper",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=test_tpr_lower,
+                    fill="tonexty",
+                    fillcolor=c_fill_test,
+                    line=dict(color=c_line_test, width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="lower",
+                ),
+                go.Scatter(
+                    x=fpr_mean,
+                    y=test_tpr_mean,
+                    line=dict(color=c_line_main_test, width=2),
+                    hoverinfo="skip",
+                    showlegend=True,
+                    name=f"Test_AUC: {test_auc:.3f}",
+                ),
+            ]
+        )
+        fig.add_shape(type="line", line=dict(dash="dash"), x0=0, x1=1, y0=0, y1=1)
+        fig.update_layout(
+            title="ROC Curve for MLP model",
+            template="plotly_white",
+            title_x=0.5,
+            xaxis_title="1 - Specificity",
+            yaxis_title="Sensitivity",
+            width=800,
+            height=800,
+            legend=dict(
+                yanchor="bottom", xanchor="right", x=0.95, y=0.01, font=dict(size=24)
+            ),
+            yaxis=dict(tickfont=dict(size=16), titlefont=dict(size=20)),
+            xaxis=dict(tickfont=dict(size=16), titlefont=dict(size=20)),
+            margin=go.layout.Margin(
+                l=0,  # left margin
+                r=0,  # right margin
+                b=0,  # bottom margin
+                t=50,  # top margin
+            ),
+        )
+
+        fig.update_yaxes(
+            range=[0, 1],
+            gridcolor=c_grid,
+            scaleanchor="x",
+            scaleratio=1,
+            linecolor="black",
+        )
+        fig.update_xaxes(
+            range=[0, 1], gridcolor=c_grid, constrain="domain", linecolor="black"
+        )
+        # import os
+
+        # if not os.path.exists("images"):
+        #     os.mkdir("images")
+
+        # fig.write_image("images/viva/roc_curve_mlp.svg")
+        fig.show()
+        return results, model
 
     def plot_loss_acc(self, history):
         fig = plt.figure(figsize=(20, 10))
@@ -225,14 +422,27 @@ class SVM_model:
         self.hardness = hardness
         self.gamma = gamma
         self.default = default
+        if self.default:
+            self.params = {
+                "kernel": "rbf",
+                "C": 1,
+                "gamma": "scale",
+                "probability": True,
+            }
+        else:
+            self.params = {
+                "kernel": self.kernel,
+                "C": self.hardness,
+                "gamma": self.gamma,
+                "probability": True,
+            }
+
+    def model_(self):
+        self.model = SVC().set_params(**self.params)
+        return self.model
 
     def train(self, x_train, y_train):
-        if self.default:
-            self.model = SVC(probability=True)
-        else:
-            self.model = SVC(
-                kernel=self.kernel, C=self.hardness, gamma=self.gamma, probability=True
-            )
+        self.model = self.model_()
         self.model.fit(x_train, y_train)
 
     def predict_proba(self, x_data):
@@ -280,7 +490,7 @@ class SVM_model:
         plt.legend(fontsize=18)
         plt.show()
 
-    def roc_curve(self, X_train, y_train, X_test, y_test, ratio=1):
+    def roc_curve_error(self, X_train, y_train, X_test, y_test, ratio=1):
         n_repeats = 10
         cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=n_repeats, random_state=42)
         folds = [(train, val_temp) for train, val_temp in cv.split(X_train, y_train)]
@@ -292,23 +502,12 @@ class SVM_model:
             "test": {m: [] for m in metrics},
         }
 
-        params = {
-            "kernel": self.kernel,
-            "C": self.hardness,
-            "gamma": self.gamma,
-            "random_state": 42,
-        }
-
         dtest = (X_test, y_test)
         for train, test in tqdm(folds, total=len(folds)):
             dtrain = (X_train[train, :], y_train[train])
             dval = (X_train[test, :], y_train[test])
 
-            model = (
-                SVC()
-                .set_params(**params)
-                .fit(dtrain[0], dtrain[1], eval_set=[dval], verbose=0)
-            )
+            model = self.model_().fit(dtrain[0], dtrain[1])
             sets = [dtrain, dval, dtest]
             for i, ds in enumerate(results.keys()):
                 y_preds = model.predict_proba(sets[i][0])[:, 1]
@@ -448,7 +647,7 @@ class SVM_model:
         )
         fig.add_shape(type="line", line=dict(dash="dash"), x0=0, x1=1, y0=0, y1=1)
         fig.update_layout(
-            # title=title,
+            title="ROC Curve for SVM model",
             template="plotly_white",
             title_x=0.5,
             xaxis_title="1 - Specificity",
@@ -464,7 +663,7 @@ class SVM_model:
                 l=0,  # left margin
                 r=0,  # right margin
                 b=0,  # bottom margin
-                t=0,  # top margin
+                t=50,  # top margin
             ),
         )
 
@@ -483,8 +682,8 @@ class SVM_model:
         # if not os.path.exists("images"):
         #     os.mkdir("images")
 
-        # fig.write_image("images/roc_curve_test2.svg")
-        # fig.show()
+        # fig.write_image("images/viva/roc_curve_svm2.svg")
+        fig.show()
         return results, model
 
     def conf_mat_plot(
@@ -578,22 +777,72 @@ class SVM_model:
 
 
 class XGB_model:
-    def __init__(self, params: dict = None):
-        self.params = params
-        if self.params == None:
-            self.default = True
+    def __init__(self, default: bool = True):
+        self.default = default
+
+        if self.default:
+            self.params = {
+                "early_stopping_rounds": 20,
+                "max_depth": 3,
+                "learning_rate": 0.1,
+                "n_estimators": 100,
+                "silent": True,
+                "verbosity": 0,
+                "objective": "binary:logistic",
+                "eval_metric": "logloss",
+                "booster": "gbtree",
+                "n_jobs": -1,
+                "nthread": None,
+                "gamma": 0,
+                "min_child_weight": 1,
+                "max_delta_step": 0,
+                "subsample": 1,
+                "colsample_bytree": 1,
+                "colsample_bylevel": 1,
+                "reg_alpha": 0,
+                "reg_lambda": 1,
+                "scale_pos_weight": 1,
+                "base_score": 0.5,
+                "use_label_encoder": False,
+                "random_state": 42,
+                "seed": 42,
+            }
+
+        else:
+            self.params = {
+                "early_stopping_rounds": 20,
+                "max_depth": 9,
+                "learning_rate": 0.1,
+                "n_estimators": 1000,
+                "silent": True,
+                "verbosity": 0,
+                "objective": "binary:logistic",
+                "eval_metric": "logloss",
+                "booster": "gbtree",
+                "n_jobs": -1,
+                "nthread": None,
+                "gamma": 0,
+                "min_child_weight": 1,
+                "max_delta_step": 0,
+                "subsample": 1,
+                "colsample_bytree": 1,
+                "colsample_bylevel": 1,
+                "reg_alpha": 0,
+                "reg_lambda": 1,
+                "scale_pos_weight": 1,
+                "base_score": 0.5,
+                "use_label_encoder": False,
+                "random_state": 42,
+                "seed": 42,
+            }
 
     def model_(self):
-        if self.default:
-            self.model = XGBClassifier(use_label_encoder=False)
-        else:
-            self.model = XGBClassifier(use_label_encoder=False).set_params(
-                **self.params
-            )
+        self.model = XGBClassifier(use_label_encoder=False).set_params(**self.params)
+        return self.model
 
     def train(self, x_train, y_train):
-        self.model_()
-        self.model.fit(x_train, y_train, eval_metric="logloss")
+        self.model = self.model_()
+        self.model.fit(x_train, y_train).set_params(**self.params)
 
     def predict_proba(self, x_data):
         output = self.model.predict_proba(x_data)
@@ -696,72 +945,12 @@ class XGB_model:
             "val": {m: [] for m in metrics},
             "test": {m: [] for m in metrics},
         }
-        if default:
-            params = {
-                "early_stopping_rounds": 20,
-                "max_depth": 3,
-                "learning_rate": 0.1,
-                "n_estimators": 100,
-                "silent": True,
-                "verbosity": 0,
-                "objective": "binary:logistic",
-                "eval_metric": "logloss",
-                "booster": "gbtree",
-                "n_jobs": -1,
-                "nthread": None,
-                "gamma": 0,
-                "min_child_weight": 1,
-                "max_delta_step": 0,
-                "subsample": 1,
-                "colsample_bytree": 1,
-                "colsample_bylevel": 1,
-                "reg_alpha": 0,
-                "reg_lambda": 1,
-                "scale_pos_weight": 1,
-                "base_score": 0.5,
-                "use_label_encoder": False,
-                "random_state": 42,
-                "seed": 42,
-            }
-
-        else:
-            params = {
-                "early_stopping_rounds": 20,
-                "max_depth": 9,
-                "learning_rate": 0.1,
-                "n_estimators": 1000,
-                "silent": True,
-                "verbosity": 0,
-                "objective": "binary:logistic",
-                "eval_metric": "logloss",
-                "booster": "gbtree",
-                "n_jobs": -1,
-                "nthread": None,
-                "gamma": 0,
-                "min_child_weight": 1,
-                "max_delta_step": 0,
-                "subsample": 1,
-                "colsample_bytree": 1,
-                "colsample_bylevel": 1,
-                "reg_alpha": 0,
-                "reg_lambda": 1,
-                "scale_pos_weight": 1,
-                "base_score": 0.5,
-                "use_label_encoder": False,
-                "random_state": 42,
-                "seed": 42,
-            }
-
         dtest = (X_test, y_test)
         for train, test in tqdm(folds, total=len(folds)):
-            dtrain = (X_train.iloc[train, :], y_train.iloc[train])
-            dval = (X_train.iloc[test, :], y_train.iloc[test])
+            dtrain = (X_train[train, :], y_train[train])
+            dval = (X_train[test, :], y_train[test])
 
-            model = (
-                self.model()
-                .set_params(**params)
-                .fit(dtrain[0], dtrain[1], eval_set=[dval], verbose=0)
-            )
+            model = self.model_().fit(dtrain[0], dtrain[1], eval_set=[dval], verbose=0)
             sets = [dtrain, dval, dtest]
             for i, ds in enumerate(results.keys()):
                 y_preds = model.predict_proba(sets[i][0])[:, 1]
@@ -901,7 +1090,7 @@ class XGB_model:
         )
         fig.add_shape(type="line", line=dict(dash="dash"), x0=0, x1=1, y0=0, y1=1)
         fig.update_layout(
-            # title=title,
+            title="ROC Curve for XGB model",
             template="plotly_white",
             title_x=0.5,
             xaxis_title="1 - Specificity",
@@ -917,7 +1106,7 @@ class XGB_model:
                 l=0,  # left margin
                 r=0,  # right margin
                 b=0,  # bottom margin
-                t=0,  # top margin
+                t=50,  # top margin
             ),
         )
 
@@ -936,8 +1125,8 @@ class XGB_model:
         # if not os.path.exists("images"):
         #     os.mkdir("images")
 
-        # fig.write_image("images/roc_curve_test2.svg")
-        # fig.show()
+        # fig.write_image("images/viva/roc_curve_xgb2.svg")
+        fig.show()
         return results, model
 
     def precision_recall(
@@ -1015,7 +1204,7 @@ class XGB_model:
             dval = (X_train.iloc[test, :], y_train.iloc[test])
 
             model = (
-                self.model()
+                self.model_()
                 .set_params(**params)
                 .fit(dtrain[0], dtrain[1], eval_set=[dval], verbose=0)
             )
@@ -1473,53 +1662,52 @@ def time_by_energy(
 
 
 if __name__ == "__main__":
-    data_interfaces = psiK.generate_data_interface("psiK_1000.root")
-    # data_interfaces = psiK.generate_data_interface("Bu2JpsiK_ee_mu1.1_1000_events.root")
-    data = psiK.generate_data_mixing(data_interfaces, sampling_frac=1)
-    (
-        training_data,
-        training_labels,
-        validation_data,
-        validation_labels,
-    ) = psiK.generate_prepared_data(data)
+    pass
+    # data_interfaces = psiK.generate_data_interface("psiK_1000.root")
+    # # data_interfaces = psiK.generate_data_interface("Bu2JpsiK_ee_mu1.1_1000_events.root")
+    # data = psiK.generate_data_mixing(data_interfaces, sampling_frac=1)
+    # (
+    #     training_data,
+    #     training_labels,
+    # ) = psiK.generate_prepared_data(data, no_split = True)
 
-    np.random.seed(42)
-    tf.random.set_seed(42)
-    mlp = MLP_model(1000, 200)
-    history = mlp.train(
-        training_data, training_labels, validation_data, validation_labels, 0
-    )
-    mlp.conf_mat_plot(
-        training_data, training_labels, validation_data, validation_labels
-    )
-    mlp.plot_loss_acc(history)
-    mlp.plot_roc_curve(
-        training_data, training_labels, validation_data, validation_labels
-    )
-    mlp.decision_function(
-        training_data, training_labels, validation_data, validation_labels
-    )
+    # np.random.seed(42)
+    # tf.random.set_seed(42)
+    # mlp = MLP_model(1000, 200)
+    # history = mlp.train(
+    #     training_data, training_labels, validation_data, validation_labels, 0
+    # )
+    # mlp.conf_mat_plot(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
+    # mlp.plot_loss_acc(history)
+    # mlp.plot_roc_curve(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
+    # mlp.decision_function(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
 
-    svc = SVM_model(default=True)
-    svc.train(training_data, training_labels)
-    svc.conf_mat_plot(
-        training_data, training_labels, validation_data, validation_labels
-    )
-    svc.plot_roc_curve(
-        training_data, training_labels, validation_data, validation_labels
-    )
-    svc.decision_function(
-        training_data, training_labels, validation_data, validation_labels
-    )
+    # svc = SVM_model(default=True)
+    # svc.train(training_data, training_labels)
+    # svc.conf_mat_plot(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
+    # svc.plot_roc_curve(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
+    # svc.decision_function(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
 
-    xgb = XGB_model()
-    xgb.train(training_data, training_labels)
-    xgb.conf_mat_plot(
-        training_data, training_labels, validation_data, validation_labels
-    )
-    xgb.plot_roc_curve(
-        training_data, training_labels, validation_data, validation_labels
-    )
-    xgb.decision_function(
-        training_data, training_labels, validation_data, validation_labels
-    )
+    # xgb = XGB_model()
+    # xgb.train(training_data, training_labels)
+    # xgb.conf_mat_plot(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
+    # xgb.plot_roc_curve(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )
+    # xgb.decision_function(
+    #     training_data, training_labels, validation_data, validation_labels
+    # )

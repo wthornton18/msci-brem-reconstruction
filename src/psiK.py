@@ -668,22 +668,27 @@ def generate_data_mixing(
     return pd.concat(full)
 
 
-def generate_prepared_data(data: pd.DataFrame, split_frac: int = 0.9):
+def generate_prepared_data(
+    data: pd.DataFrame, split_frac: int = 0.9, no_split: bool = False
+):
     label_list = data["label"].to_numpy()
     new_df = data.drop(["label", "id", "e_energy", "b_energy"], axis=1)
     new_data = new_df.to_numpy()
-    indices = np.random.permutation(new_data.shape[0])
-    i = int(split_frac * new_data.shape[0])
-    training_idx, validation_idx = indices[:i], indices[i:]
-    training_data, validation_data = (
-        new_data[training_idx, :],
-        new_data[validation_idx, :],
-    )
-    training_labels, validation_labels = (
-        label_list[training_idx],
-        label_list[validation_idx],
-    )
-    return training_data, training_labels, validation_data, validation_labels
+    if no_split:
+        return new_data, label_list
+    else:
+        indices = np.random.permutation(new_data.shape[0])
+        i = int(split_frac * new_data.shape[0])
+        training_idx, validation_idx = indices[:i], indices[i:]
+        training_data, validation_data = (
+            new_data[training_idx, :],
+            new_data[validation_idx, :],
+        )
+        training_labels, validation_labels = (
+            label_list[training_idx],
+            label_list[validation_idx],
+        )
+        return training_data, training_labels, validation_data, validation_labels
 
 
 def train_classifier(
