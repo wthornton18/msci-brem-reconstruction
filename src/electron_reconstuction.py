@@ -307,14 +307,22 @@ class EventData:
         brem_pos.extend(self.brem_plus_positions)
         return (brem_momentum, brem_pos, self.event_number)
 
-    def full_brem_data_slice(self) -> pd.DataFrame:
+    def full_brem_data_slice(self, threshold: float = 30, train: bool = True) -> pd.DataFrame:
         return pd.concat(
             [
                 self.generate_brem_data_slice(
-                    self.brem_minus_momenta, self.true_brem_minus_momenta, self.brem_minus_positions
+                    self.brem_minus_momenta,
+                    self.true_brem_minus_momenta,
+                    self.brem_minus_positions,
+                    threshold,
+                    train,
                 ),
                 self.generate_brem_data_slice(
-                    self.brem_plus_momenta, self.true_brem_plus_momenta, self.brem_plus_positions
+                    self.brem_plus_momenta,
+                    self.true_brem_plus_momenta,
+                    self.brem_plus_positions,
+                    threshold,
+                    train,
                 ),
             ]
         )
@@ -324,22 +332,28 @@ class EventData:
         reco: List[MomentumObject4D],
         true: List[MomentumObject4D],
         positions: List[VectorObject3D],
+        threshold: float = 30,
+        train: bool = True,
     ):
         out = []
+        if not train:
+            true = [0 for _ in range(len(reco))]
         for r, t, p in zip(reco, true, positions):
             temp = {
-                "eta": r.eta,
-                "phi": r.phi,
-                "e": r.e,
-                "pt": r.pt,
                 "x": p.x,
                 "y": p.y,
                 "z": p.z,
-                "true_eta": t.eta,
-                "true_phi": t.phi,
-                "true_e": t.e,
-                "true_pt": t.pt,
+                "e": r.e,
+                "eta": r.eta,
+                "phi": r.phi,
+                "pt": r.pt,
             }
+            if train:
+                temp["id"] = self.event_number
+                if r.e / t.e > threshold:
+                    temp["label"] = 0
+                else:
+                    temp["label"] = 1
             out.append(temp)
         return pd.DataFrame.from_records(out)
 
@@ -387,7 +401,7 @@ class EventData:
             px = brem.px + e.px
             py = brem.py + e.py
             pz = brem.pz + e.pz
-            energy = np.sqrt(e.m ** 2 + px ** 2 + py ** 2 + pz ** 2)
+            energy = np.sqrt(e.m**2 + px**2 + py**2 + pz**2)
             e = vector.obj(e=energy, px=px, py=py, pz=pz)
         return e
 
@@ -400,12 +414,40 @@ class EventData:
             px = e.px * fac
             py = e.py * fac
             pz = e.pz * fac
-            energy = np.sqrt(e.m ** 2 + p ** 2)
+            energy = np.sqrt(e.m**2 + p**2)
             e = vector.obj(e=energy, px=px, py=py, pz=pz)
         return e
 
+    def method_3(
+        self,
+        e: MomentumObject4D,
+        brem_arr: List[MomentumObject4D],
+        brem_pos: List[VectorObject3D],
+        classifier: XGBClassifier,
+    ):
+        if len(brem_arr) > 0:
+            brem_df = self.generate_brem_data_slice(brem_arr, None, brem_pos, train=False)
+            brem_np = brem_df.to_numpy()
+            pred = classifier.predict(brem_np) == 1
+            for brem in compress(brem_arr, pred):
+                e += brem
+        return e
+
+    def method_4(
+        self,
+        e: MomentumObject4D,
+        brem_arr: List[MomentumObject4D],
+    ):
+        for brem in brem_arr:
+            e += brem
+        return e
+
     def jpsi_ourreco(
-        self, classifier: XGBClassifier, cutoff: Optional[float] = None, m_method: int = 0
+        self,
+        classifier: XGBClassifier,
+        cutoff: Optional[float] = None,
+        m_method: int = 0,
+        brem_classifier: Optional[XGBClassifier] = None,
     ) -> MomentumObject4D:
         full_brem_pos = deepcopy(self.brem_minus_positions)
         full_brem_momentum = deepcopy(self.brem_minus_momenta)
@@ -441,6 +483,17 @@ class EventData:
                 e_plus_reco = self.method_1(e_plus_reco, plus_brem_momentum)
             elif m_method == 2:
                 e_plus_reco = self.method_2(e_plus_reco, plus_brem_momentum)
+            elif m_method == 3 and brem_classifier is not None:
+                plus_brem_positions: List[VectorObject3D] = list(
+                    compress(self.brem_plus_positions, plus_predictions)
+                )
+                e_plus_reco = self.method_3(
+                    e_plus_reco, plus_brem_momentum, plus_brem_positions, brem_classifier
+                )
+            elif m_method == 4:
+                e_plus_reco = self.method_4(
+                    e_plus_reco, list(compress(self.true_brem_plus_momenta, plus_predictions))
+                )
             else:
                 raise ValueError(f"not a valid method {m_method}")
         if len(minus_arr) > 0:
@@ -455,14 +508,34 @@ class EventData:
                 e_minus_reco = self.method_1(e_minus_reco, minus_brem_momentum)
             elif m_method == 2:
                 e_minus_reco = self.method_2(e_minus_reco, minus_brem_momentum)
+            elif m_method == 3 and brem_classifier is not None:
+                minus_brem_positions: List[VectorObject3D] = list(
+                    compress(self.brem_minus_positions, minus_predictions)
+                )
+                e_minus_reco = self.method_3(
+                    e_minus_reco, minus_brem_momentum, minus_brem_positions, brem_classifier
+                )
+            elif m_method == 4:
+                e_minus_reco = self.method_4(
+                    e_minus_reco, list(compress(self.true_brem_minus_momenta, minus_predictions))
+                )
             else:
                 raise ValueError(f"not a valid method {m_method}")
         return e_plus_reco + e_minus_reco
 
     def b_ourreco(
-        self, classifier: XGBClassifier, cutoff: Optional[float] = None, m_method: int = 0
+        self,
+        classifier: XGBClassifier,
+        cutoff: Optional[float] = None,
+        m_method: int = 0,
+        brem_classifier: Optional[XGBClassifier] = None,
     ) -> MomentumObject4D:
-        return self.jpsi_ourreco(classifier=classifier, cutoff=cutoff, m_method=m_method) + self.k_momentum
+        return (
+            self.jpsi_ourreco(
+                classifier=classifier, cutoff=cutoff, m_method=m_method, brem_classifier=brem_classifier
+            )
+            + self.k_momentum
+        )
 
 
 def reco_brem_photons_nxyze(n_arr, xi, yi, zi, ei, cutoff: float, ovz):
@@ -483,7 +556,7 @@ def reco_brem_photons_nxyze(n_arr, xi, yi, zi, ei, cutoff: float, ovz):
 
 
 def reco_brem_xyze(x: float, y: float, z: float, e: float):
-    mag = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+    mag = np.sqrt(x**2 + y**2 + z**2)
     ratio = (1 / mag) * e
     return vector.obj(energy=e, px=x * ratio, py=y * ratio, pz=z * ratio)
 
@@ -538,39 +611,47 @@ def generate_prepared_data(data: pd.DataFrame, split_frac: float = 0.9):
     return training_data, training_labels, validation_data, validation_labels
 
 
-def generate_brem_data_mixing(data: List[EventData], sampling_frac: int = 1):
-    base_df = pd.concat([d.full_brem_data_slice() for d in data])
-    X, y = (
-        base_df[["eta", "phi", "e", "pt", "x", "y", "z"]],
-        base_df[["true_eta", "true_phi"]],
-    )
-    X = X.to_numpy()
-    y = y.to_numpy()
-    return X, y
+def generate_brem_data_mixing(data: List[EventData], threshold: int = 10):
+    """
+    It takes a list of EventData objects, and for each EventData object, it takes the
+    full_brem_data_slice, and then concatenates all of the slices together
+
+    Args:
+      data (List[EventData]): List[EventData]
+      threshold (int): The threshold for the number of photons in a given event. Defaults to 10
+
+    Returns:
+      A dataframe with the same number of rows as the true dataframe, but with the same number of
+    columns as the reco dataframe.
+    """
+    base_df = pd.concat([d.full_brem_data_slice(threshold=threshold) for d in data])
+
+    true_df = base_df[base_df["label"] == 1]
+    reco_df = base_df[base_df["label"] == 0].sample(true_df.shape[0], replace=True)
+    print(reco_df.shape)
+    return pd.concat([true_df, reco_df])
 
 
-def generate_brem_prepared_data(X: np.ndarray, y: np.ndarray, split_frac: float = 0.9):
-    indices = np.random.permutation(X.shape[0])
-    i = int(split_frac * X.shape[0])
-    training_idx, validation_idx = indices[:i], indices[i:]
-    train_X, val_X = X[training_idx, :], X[validation_idx, :]
-    train_y, val_y = y[training_idx, :], y[validation_idx, :]
-    return train_X, train_y, val_X, val_y
-
-
-def train_regressor(
+def train_brem_classifier(
     training_data: np.ndarray,
-    train_labels: np.ndarray,
+    training_labels: np.ndarray,
     validation_data: np.ndarray,
     validation_labels: np.ndarray,
 ):
-    xgb = MultiOutputRegressor(XGBRegressor())
-    xgb.fit(training_data, train_labels)
-    train_mse = np.mean((xgb.predict(training_data) - train_labels) ** 2, axis=0)
-    val_mse = np.mean((xgb.predict(validation_data) - validation_labels) ** 2, axis=0)
-    print(train_mse)
-    print(val_mse)
+    xgb = XGBClassifier()
+    xgb.fit(training_data, training_labels)
+    train_acc = 100 * (sum(xgb.predict(training_data) == training_labels) / training_data.shape[0])
+    val_acc = 100 * (sum(xgb.predict(validation_data) == validation_labels) / validation_data.shape[0])
+    print(train_acc)
+    print(val_acc)
     return xgb
+
+
+def test_brem_pre_label(filename: str):
+    event_data = unpack_data(filename)
+    df = generate_brem_data_mixing(event_data)
+    training_data, training_labels, validation_data, validation_labels = generate_prepared_data(df)
+    train_brem_classifier(training_data, training_labels, validation_data, validation_labels)
 
 
 def train_classifier(
@@ -696,7 +777,11 @@ def eval_and_gen(filename: str, classifier: Optional[XGBClassifier] = None) -> O
 
 
 def plot_masses(
-    classifier: XGBClassifier, data: List[EventData], cutoff: Optional[float] = None, m_method: int = 3
+    classifier: XGBClassifier,
+    data: List[EventData],
+    cutoff: Optional[float] = None,
+    m_method: int = 3,
+    brem_classifier: Optional[XGBClassifier] = None,
 ):
     jpsi_noreco = []
     jpsi_truereco = []
@@ -711,26 +796,134 @@ def plot_masses(
         jpsi_noreco.append(d.jpsi_noreco.m)
         jpsi_truereco.append(d.jpsi_truereco.m)
         jpsi_stdreco.append(d.jpsi_stdreco.m)
-        jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier, cutoff=cutoff, m_method=m_method).m)
+        jpsi_ourreco.append(
+            d.jpsi_ourreco(
+                classifier=classifier, cutoff=cutoff, m_method=m_method, brem_classifier=brem_classifier
+            ).m
+        )
 
         b_noreco.append(d.b_noreco.m)
         b_truereco.append(d.b_truereco_from_electron.m)
         b_stdreco.append(d.b_stdreco.m)
-        b_ourreco.append(d.b_ourreco(classifier=classifier, cutoff=cutoff, m_method=m_method).m)
-    fig, axes = plt.subplots(nrows=2, ncols=1)
+        b_ourreco.append(
+            d.b_ourreco(
+                classifier=classifier, cutoff=cutoff, m_method=m_method, brem_classifier=brem_classifier
+            ).m
+        )
+    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(18, 18))
 
-    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20, density=True)
-    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20, density=True)
-    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20, density=True)
-    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    nbins = 30
 
-    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20, density=True)
-    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20, density=True)
-    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20, density=True)
-    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[0].hist(
+        jpsi_noreco,
+        label="no reco",
+        histtype="stepfilled",
+        range=(1000, 4000),
+        bins=nbins,
+        density=True,
+        alpha=0.5,
+    )
 
-    axes[0].legend()
-    axes[1].legend()
-    axes[0].set_xlabel(r"$m_{J/psi}$ [MeV]")
-    axes[1].set_xlabel(r"$m_{B}$ [MeV]")
+    axes[0].hist(
+        jpsi_truereco,
+        label="true reco",
+        histtype="step",
+        range=(1000, 4000),
+        bins=nbins,
+        density=True,
+        color="black",
+    )
+
+    axes[0].hist(
+        jpsi_stdreco,
+        label="std reco",
+        histtype="stepfilled",
+        range=(1000, 4000),
+        bins=nbins,
+        density=True,
+        alpha=0.5,
+    )
+
+    axes[0].hist(
+        jpsi_ourreco,
+        label="our reco",
+        histtype="stepfilled",
+        range=(1000, 6000),
+        bins=nbins * 2,
+        density=True,
+        alpha=0.5,
+    )
+
+    axes[1].hist(
+        b_noreco,
+        label="no reco",
+        histtype="stepfilled",
+        range=(3000, 5600),
+        bins=nbins,
+        density=True,
+        alpha=0.5,
+    )
+
+    axes[1].hist(
+        b_truereco,
+        label="true reco",
+        histtype="step",
+        range=(3000, 5600),
+        bins=nbins,
+        density=True,
+        color="black",
+    )
+
+    axes[1].hist(
+        b_stdreco,
+        label="std reco",
+        histtype="stepfilled",
+        range=(3000, 5600),
+        bins=nbins,
+        density=True,
+        alpha=0.5,
+    )
+
+    axes[1].hist(
+        b_ourreco,
+        label="our reco",
+        histtype="stepfilled",
+        range=(3000, 6000),
+        bins=nbins * 2,
+        density=True,
+        alpha=0.5,
+    )
+
+    label_size = 18
+
+    plt.rcParams["xtick.labelsize"] = label_size
+
+    plt.rcParams["ytick.labelsize"] = label_size
+
+    axes[0].set_ylabel("Counts/Bin", fontsize=18)
+
+    axes[1].set_ylabel("Counts/Bin", fontsize=18)
+
+    axes[0].tick_params(axis="x", labelsize=14)
+    axes[1].tick_params(axis="x", labelsize=14)
+
+    axes[0].tick_params(axis="y", labelsize=14)
+    axes[1].tick_params(axis="y", labelsize=14)
+
+    axes[0].grid(alpha=0.5)
+
+    axes[1].grid(alpha=0.5)
+
+    axes[0].set_xlim((1000, 6000))
+
+    axes[1].set_xlim((3000, 6000))
+
+    axes[0].legend(prop={"size": 18})
+
+    axes[1].legend(prop={"size": 18})
+
+    axes[0].set_xlabel(r"$m_{J/psi}$ [MeV]", fontsize=18)
+
+    axes[1].set_xlabel(r"$m_{B}$ [MeV]", fontsize=18)
+    plt.savefig("plot_masses.svg")
     plt.show()
