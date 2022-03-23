@@ -2,7 +2,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 import uproot
 from uproot import TBranch
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from utils import chunked, named_zip
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,9 +11,11 @@ from itertools import compress
 from random import sample
 from copy import deepcopy
 import vector
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 from vector import MomentumObject4D, VectorObject3D
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics import mean_squared_error
+from sklearn.multioutput import MultiOutputRegressor
 
 data = namedtuple(
     "data",
@@ -59,7 +61,7 @@ data = namedtuple(
 )
 
 
-def unpack_data(filename: str):
+def unpack_data(filename: str, cutoff: float = 5000):
     with uproot.open(filename) as file:
         tree: Dict[str, TBranch] = file["tuple/tuple;1"]
         datapoints: List[EventData] = []
@@ -124,6 +126,8 @@ def unpack_data(filename: str):
                 e_plus_data.brem_y,
                 e_plus_data.brem_z,
                 e_plus_data.brem_cluster_e,
+                cutoff=cutoff,
+                ovz=e_plus_data.brem_ovz,
             )
             brem_plus_ovz = e_plus_data.brem_ovz
             brem_minus_ovz = e_minus_data.brem_ovz
@@ -133,12 +137,22 @@ def unpack_data(filename: str):
                 e_minus_data.brem_y,
                 e_minus_data.brem_z,
                 e_minus_data.brem_cluster_e,
+                cutoff=cutoff,
+                ovz=e_minus_data.brem_ovz,
             )
-            e_plus_true_photons = reco_brem_photons_pxpypze(
-                e_plus_data.brem_px, e_plus_data.brem_py, e_plus_data.brem_pz, e_plus_data.brem_e
+            e_plus_true_photons = filter_by_ovz(
+                e_plus_data.brem_ovz,
+                reco_brem_photons_pxpypze(
+                    e_plus_data.brem_px, e_plus_data.brem_py, e_plus_data.brem_pz, e_plus_data.brem_e
+                ),
+                cutoff,
             )
-            e_minus_true_photons = reco_brem_photons_pxpypze(
-                e_minus_data.brem_px, e_minus_data.brem_py, e_minus_data.brem_pz, e_minus_data.brem_e
+            e_minus_true_photons = filter_by_ovz(
+                e_minus_data.brem_ovz,
+                reco_brem_photons_pxpypze(
+                    e_minus_data.brem_px, e_minus_data.brem_py, e_minus_data.brem_pz, e_minus_data.brem_e
+                ),
+                cutoff,
             )
 
             e_plus_std = vector.obj(
@@ -225,17 +239,21 @@ class EventData:
         brem_momenta: List[MomentumObject4D],
         brem_positions: List[VectorObject3D],
         label: Optional[int] = None,
+        cutoff: Optional[float] = None,
     ):
+        if cutoff is None:
+            cutoff = 0
         out = []
         for (brem_momentum, brem_pos) in zip(brem_momenta, brem_positions):
-            temp = {}
-            dp: MomentumObject4D = e_momentum - brem_momentum
-            dr: VectorObject3D = e_pos - brem_pos
-            temp = {"p_dphi": dp.phi, "p_dtheta": dp.theta, "x_dtheta": dr.theta, "x_dphi": dr.phi}
-            if label is not None:
-                temp.update({"id": self.event_number, "label": label})
+            if brem_momentum.E > cutoff:
+                temp = {}
+                dp: MomentumObject4D = e_momentum - brem_momentum
+                dr: VectorObject3D = e_pos - brem_pos
+                temp = {"p_dphi": dp.phi, "p_dtheta": dp.theta, "x_dtheta": dr.theta, "x_dphi": dr.phi}
+                if label is not None:
+                    temp.update({"id": self.event_number, "label": label})
 
-            out.append(temp)
+                out.append(temp)
 
         return pd.DataFrame.from_records(out)
 
@@ -289,6 +307,42 @@ class EventData:
         brem_pos.extend(self.brem_plus_positions)
         return (brem_momentum, brem_pos, self.event_number)
 
+    def full_brem_data_slice(self) -> pd.DataFrame:
+        return pd.concat(
+            [
+                self.generate_brem_data_slice(
+                    self.brem_minus_momenta, self.true_brem_minus_momenta, self.brem_minus_positions
+                ),
+                self.generate_brem_data_slice(
+                    self.brem_plus_momenta, self.true_brem_plus_momenta, self.brem_plus_positions
+                ),
+            ]
+        )
+
+    def generate_brem_data_slice(
+        self,
+        reco: List[MomentumObject4D],
+        true: List[MomentumObject4D],
+        positions: List[VectorObject3D],
+    ):
+        out = []
+        for r, t, p in zip(reco, true, positions):
+            temp = {
+                "eta": r.eta,
+                "phi": r.phi,
+                "e": r.e,
+                "pt": r.pt,
+                "x": p.x,
+                "y": p.y,
+                "z": p.z,
+                "true_eta": t.eta,
+                "true_phi": t.phi,
+                "true_e": t.e,
+                "true_pt": t.pt,
+            }
+            out.append(temp)
+        return pd.DataFrame.from_records(out)
+
     @property
     def jpsi_noreco(self) -> MomentumObject4D:
         return self.electron_plus_momentum + self.electron_minus_momentum
@@ -323,38 +377,95 @@ class EventData:
     def b_truereco(self) -> MomentumObject4D:
         return self.k_momentum + self.jpsi_momentum
 
-    def jpsi_ourreco(self, classifier: XGBClassifier) -> MomentumObject4D:
+    def method_0(self, e: MomentumObject4D, brem_arr: List[MomentumObject4D]):
+        for brem in brem_arr:
+            e += brem
+        return e
+
+    def method_1(self, e: MomentumObject4D, brem_arr: List[MomentumObject4D]):
+        for brem in brem_arr:
+            px = brem.px + e.px
+            py = brem.py + e.py
+            pz = brem.pz + e.pz
+            energy = np.sqrt(e.m ** 2 + px ** 2 + py ** 2 + pz ** 2)
+            e = vector.obj(e=energy, px=px, py=py, pz=pz)
+        return e
+
+    def method_2(self, e: MomentumObject4D, brem_arr: List[MomentumObject4D]):
+        for brem in brem_arr:
+            bp = brem.p
+            ep = e.p
+            p = bp + ep
+            fac = p / ep
+            px = e.px * fac
+            py = e.py * fac
+            pz = e.pz * fac
+            energy = np.sqrt(e.m ** 2 + p ** 2)
+            e = vector.obj(e=energy, px=px, py=py, pz=pz)
+        return e
+
+    def jpsi_ourreco(
+        self, classifier: XGBClassifier, cutoff: Optional[float] = None, m_method: int = 0
+    ) -> MomentumObject4D:
         full_brem_pos = deepcopy(self.brem_minus_positions)
         full_brem_momentum = deepcopy(self.brem_minus_momenta)
         full_brem_pos.extend(self.brem_plus_positions)
         full_brem_momentum.extend(self.brem_plus_momenta)
         plus_df = self.generate_data_slice(
-            self.electron_plus_momentum, self.electron_plus_position, full_brem_momentum, full_brem_pos
+            self.electron_plus_momentum,
+            self.electron_plus_position,
+            self.brem_plus_momenta,
+            self.brem_plus_positions,
+            cutoff=cutoff,
         )
 
         minus_df = self.generate_data_slice(
-            self.electron_minus_momentum, self.electron_minus_position, full_brem_momentum, full_brem_pos
+            self.electron_minus_momentum,
+            self.electron_minus_position,
+            self.brem_minus_momenta,
+            self.brem_minus_positions,
+            cutoff=cutoff,
         )
         plus_arr = plus_df.to_numpy()
         minus_arr = minus_df.to_numpy()
-        plus_predictions: List[bool] = classifier.predict(plus_arr) == 1
-        minus_predictions: List[bool] = classifier.predict(minus_arr) == 1
-        plus_brem_momentum: List[MomentumObject4D] = list(compress(full_brem_momentum, plus_predictions))
-        minus_brem_momentum: List[MomentumObject4D] = list(compress(full_brem_momentum, minus_predictions))
         e_plus_reco = deepcopy(self.electron_plus_momentum)
-        for brem_momentum in plus_brem_momentum:
-            e_plus_reco += brem_momentum
         e_minus_reco = self.electron_minus_momentum
-        for brem_momentum in deepcopy(minus_brem_momentum):
-            e_minus_reco += brem_momentum
+        if len(plus_arr) > 0:
+            plus_predictions: List[bool] = classifier.predict(plus_arr) == 1
+            plus_brem_momentum: List[MomentumObject4D] = list(
+                compress(self.brem_plus_momenta, plus_predictions)
+            )
+            if m_method == 0:
+                e_plus_reco = self.method_0(e_plus_reco, plus_brem_momentum)
+            elif m_method == 1:
+                e_plus_reco = self.method_1(e_plus_reco, plus_brem_momentum)
+            elif m_method == 2:
+                e_plus_reco = self.method_2(e_plus_reco, plus_brem_momentum)
+            else:
+                raise ValueError(f"not a valid method {m_method}")
+        if len(minus_arr) > 0:
+            minus_predictions: List[bool] = classifier.predict(minus_arr) == 1
 
+            minus_brem_momentum: List[MomentumObject4D] = list(
+                compress(self.brem_minus_momenta, minus_predictions)
+            )
+            if m_method == 0:
+                e_minus_reco = self.method_0(e_minus_reco, minus_brem_momentum)
+            elif m_method == 1:
+                e_minus_reco = self.method_1(e_minus_reco, minus_brem_momentum)
+            elif m_method == 2:
+                e_minus_reco = self.method_2(e_minus_reco, minus_brem_momentum)
+            else:
+                raise ValueError(f"not a valid method {m_method}")
         return e_plus_reco + e_minus_reco
 
-    def b_ourreco(self, classifier: XGBClassifier) -> MomentumObject4D:
-        return self.jpsi_ourreco(classifier=classifier) + self.k_momentum
+    def b_ourreco(
+        self, classifier: XGBClassifier, cutoff: Optional[float] = None, m_method: int = 0
+    ) -> MomentumObject4D:
+        return self.jpsi_ourreco(classifier=classifier, cutoff=cutoff, m_method=m_method) + self.k_momentum
 
 
-def reco_brem_photons_nxyze(n_arr, xi, yi, zi, ei):
+def reco_brem_photons_nxyze(n_arr, xi, yi, zi, ei, cutoff: float, ovz):
     brem_photons: List[MomentumObject4D] = []
     brem_positions: List[VectorObject3D] = []
     prev_n = 0
@@ -368,7 +479,7 @@ def reco_brem_photons_nxyze(n_arr, xi, yi, zi, ei):
         brem_positions.append(vector.obj(x=x_pos, y=y_pos, z=z_pos))
         prev_n += int(n)
 
-    return brem_photons, brem_positions
+    return filter_by_ovz(ovz, brem_photons, cutoff), filter_by_ovz(ovz, brem_positions, cutoff)
 
 
 def reco_brem_xyze(x: float, y: float, z: float, e: float):
@@ -384,7 +495,13 @@ def reco_brem_photons_pxpypze(px, py, pz, e):
     return brem_photons
 
 
-def generate_data_mixing(data: List[EventData], sampling_frac: int = 2) -> pd.DataFrame:
+def filter_by_ovz(
+    ovz_arr: List[float], vec_arr: List[Union[MomentumObject4D, VectorObject3D]], cutoff: float = 5000
+):
+    return list(map(lambda x: x[1], filter(lambda x: x[0] <= 5000, zip(ovz_arr, vec_arr))))
+
+
+def generate_data_mixing(data: List[EventData], sampling_frac: int = 1) -> pd.DataFrame:
     base_df = pd.concat([d.full_data_slice(label=1) for d in data])
     full = []
     brem_pos: List[VectorObject3D] = []
@@ -409,7 +526,7 @@ def generate_data_mixing(data: List[EventData], sampling_frac: int = 2) -> pd.Da
     return pd.concat(full)
 
 
-def generate_prepared_data(data: pd.DataFrame, split_frac: int = 0.9):
+def generate_prepared_data(data: pd.DataFrame, split_frac: float = 0.9):
     label_list = data["label"].to_numpy()
     new_df = data.drop(["label", "id"], axis=1)
     new_data = new_df.to_numpy()
@@ -419,6 +536,41 @@ def generate_prepared_data(data: pd.DataFrame, split_frac: int = 0.9):
     training_data, validation_data = new_data[training_idx, :], new_data[validation_idx, :]
     training_labels, validation_labels = label_list[training_idx], label_list[validation_idx]
     return training_data, training_labels, validation_data, validation_labels
+
+
+def generate_brem_data_mixing(data: List[EventData], sampling_frac: int = 1):
+    base_df = pd.concat([d.full_brem_data_slice() for d in data])
+    X, y = (
+        base_df[["eta", "phi", "e", "pt", "x", "y", "z"]],
+        base_df[["true_eta", "true_phi"]],
+    )
+    X = X.to_numpy()
+    y = y.to_numpy()
+    return X, y
+
+
+def generate_brem_prepared_data(X: np.ndarray, y: np.ndarray, split_frac: float = 0.9):
+    indices = np.random.permutation(X.shape[0])
+    i = int(split_frac * X.shape[0])
+    training_idx, validation_idx = indices[:i], indices[i:]
+    train_X, val_X = X[training_idx, :], X[validation_idx, :]
+    train_y, val_y = y[training_idx, :], y[validation_idx, :]
+    return train_X, train_y, val_X, val_y
+
+
+def train_regressor(
+    training_data: np.ndarray,
+    train_labels: np.ndarray,
+    validation_data: np.ndarray,
+    validation_labels: np.ndarray,
+):
+    xgb = MultiOutputRegressor(XGBRegressor())
+    xgb.fit(training_data, train_labels)
+    train_mse = np.mean((xgb.predict(training_data) - train_labels) ** 2, axis=0)
+    val_mse = np.mean((xgb.predict(validation_data) - validation_labels) ** 2, axis=0)
+    print(train_mse)
+    print(val_mse)
+    return xgb
 
 
 def train_classifier(
@@ -543,12 +695,14 @@ def eval_and_gen(filename: str, classifier: Optional[XGBClassifier] = None) -> O
         return classifier
 
 
-def plot_masses(classifier: XGBClassifier, data: List[EventData]):
+def plot_masses(
+    classifier: XGBClassifier, data: List[EventData], cutoff: Optional[float] = None, m_method: int = 3
+):
     jpsi_noreco = []
     jpsi_truereco = []
     jpsi_stdreco = []
     jpsi_ourreco = []
-
+    print(cutoff)
     b_noreco = []
     b_truereco = []
     b_stdreco = []
@@ -557,23 +711,23 @@ def plot_masses(classifier: XGBClassifier, data: List[EventData]):
         jpsi_noreco.append(d.jpsi_noreco.m)
         jpsi_truereco.append(d.jpsi_truereco.m)
         jpsi_stdreco.append(d.jpsi_stdreco.m)
-        jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier).m)
+        jpsi_ourreco.append(d.jpsi_ourreco(classifier=classifier, cutoff=cutoff, m_method=m_method).m)
 
         b_noreco.append(d.b_noreco.m)
         b_truereco.append(d.b_truereco_from_electron.m)
         b_stdreco.append(d.b_stdreco.m)
-        b_ourreco.append(d.b_ourreco(classifier=classifier).m)
+        b_ourreco.append(d.b_ourreco(classifier=classifier, cutoff=cutoff, m_method=m_method).m)
     fig, axes = plt.subplots(nrows=2, ncols=1)
 
-    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20)
-    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20)
+    axes[0].hist(jpsi_noreco, label="no reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    axes[0].hist(jpsi_truereco, label="true reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    axes[0].hist(jpsi_stdreco, label="std reco", histtype="step", range=(1000, 6000), bins=20, density=True)
+    axes[0].hist(jpsi_ourreco, label="our reco", histtype="step", range=(1000, 6000), bins=20, density=True)
 
-    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20)
-    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20)
+    axes[1].hist(b_noreco, label="no reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[1].hist(b_truereco, label="true reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[1].hist(b_stdreco, label="std reco", histtype="step", range=(3000, 5600), bins=20, density=True)
+    axes[1].hist(b_ourreco, label="our reco", histtype="step", range=(3000, 5600), bins=20, density=True)
 
     axes[0].legend()
     axes[1].legend()
